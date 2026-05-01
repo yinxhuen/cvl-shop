@@ -163,6 +163,14 @@ const I18N: Record<string, any> = {
 };
 
 
+const DEFAULT_PRODUCTS: Product[] = [
+  { id: 'tiramisu', nameEn: 'Tiramisu', nameZh: '提拉米苏', price: 12, stock: 12, img: "", description: '', order: 0 },
+  { id: 'bracelet', nameEn: 'Beaded Bracelet Mystery Box', nameZh: '串珠手链盲盒', price: 2, stock: 3, img: "", description: '', order: 1 },
+  { id: 'mystery', nameEn: 'Small Item Mystery Box', nameZh: '小废物盲盒', price: 3, stock: 12, img: "", description: '', order: 2 },
+  { id: 'art', nameEn: 'Abstract Mini Art', nameZh: '抽象画', price: 2, stock: 999999, img: "", description: '', order: 3 }
+];
+
+
 export default function App() {
   const [lang, setLang] = useState('zh');
   const [user, setUser] = useState<any>(null);
@@ -172,7 +180,7 @@ export default function App() {
   const [initialError, setInitialError] = useState<string | null>(null);
 
   const [assets, setAssets] = useState<ShopConfig>({
-    products: [],
+    products: DEFAULT_PRODUCTS,
     qrCodes: { duitNow: '', tng: '' }
   });
 
@@ -276,8 +284,11 @@ export default function App() {
 
     const productsRef = collection(db, `${DATA_PATH}/products`);
     const unsubProducts = onSnapshot(productsRef, (snapshot) => {
-      const data = snapshot.docs.map(d => d.data() as Product);
-      setAssets(prev => ({ ...prev, products: data }));
+      let data = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as Product[];
+      if (data.length === 0) {
+        data = DEFAULT_PRODUCTS;
+      }
+      setAssets(prev => ({ ...prev, products: data.sort((a, b) => (a.order || 0) - (b.order || 0)) }));
       setLoading(false);
     }, (err) => {
       setLoading(false);
