@@ -20,8 +20,10 @@ import {
   getDocFromServer,
   query,
   where,
-  writeBatch
+  writeBatch,
+  deleteDoc
 } from 'firebase/firestore';
+import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { 
   CheckCircle2,
   Camera, 
@@ -49,9 +51,13 @@ import {
   Trash2,
   Music,
   ClipboardList,
-  LogIn
+  LogIn,
+  ChevronUp,
+  ChevronDown,
+  Plus,
+  Pencil
 } from 'lucide-react';
-import { auth, db, DATA_PATH } from './lib/firebase';
+import { auth, db, storage, DATA_PATH } from './lib/firebase';
 import { handleFirestoreError, OperationType } from './lib/utils';
 import { Product, Customer, Greeting, Customization, Order, ShopConfig } from './types';
 
@@ -59,14 +65,6 @@ import { Product, Customer, Greeting, Customization, Order, ShopConfig } from '.
 const ADMIN_CREDENTIALS = {
   username: 'admin',
   password: 'password123'
-};
-
-// --- Inventory Limits ---
-const STOCK_LIMITS: Record<string, number> = {
-  tiramisu: 12,
-  bracelet: 3,
-  mystery: 12,
-  art: Infinity
 };
 
 // --- Localization ---
@@ -169,12 +167,6 @@ const I18N: Record<string, any> = {
   }
 };
 
-const DEFAULT_PRODUCTS: Product[] = [
-  { id: 'tiramisu', nameEn: 'Tiramisu', nameZh: '提拉米苏', price: 12, img: "" },
-  { id: 'bracelet', nameEn: 'Beaded Bracelet Mystery Box', nameZh: '串珠手链盲盒', price: 2, img: "" },
-  { id: 'mystery', nameEn: 'Small Item Mystery Box', nameZh: '小废物盲盒', price: 3, img: "" },
-  { id: 'art', nameEn: 'Abstract Mini Art', nameZh: '抽象画', price: 2, img: "" }
-];
 
 export default function App() {
   const [lang, setLang] = useState('zh');
@@ -184,14 +176,20 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   const [assets, setAssets] = useState<ShopConfig>({
-    products: DEFAULT_PRODUCTS,
+    products: [],
     qrCodes: { duitNow: '', tng: '' }
   });
 
-  const [cart, setCart] = useState<Record<string, number>>({ tiramisu: 0, bracelet: 0, mystery: 0, art: 0 });
+  const [cart, setCart] = useState<Record<string, number>>({});
   const [customer, setCustomer] = useState<Customer>({ name: '', ig: '', phone: '', delivery: 'Self Pickup' });
   const [greeting, setGreeting] = useState<Greeting>({ type: 'none', message: '' });
   const [customization, setCustomization] = useState<Customization>({ artImage: '', isKpop: false });
+  const [tipAmount, setTipAmount] = useState<number>(0);
+  const [customTip, setCustomTip] = useState<string>('');
+  
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [isProductModalOpen, setIsProductModalOpen] = useState(false);
+  
   const [currentOrderId, setCurrentOrderId] = useState<string | null>(null);
   const [paymentProof, setPaymentProof] = useState('');
   
@@ -273,9 +271,7 @@ export default function App() {
     const productsRef = collection(db, `${DATA_PATH}/products`);
     const unsubProducts = onSnapshot(productsRef, (snapshot) => {
       const data = snapshot.docs.map(d => d.data() as Product);
-      if (data.length > 0) {
-        setAssets(prev => ({ ...prev, products: data }));
-      }
+      setAssets(prev => ({ ...prev, products: data }));
       setLoading(false);
     }, (err) => {
       setLoading(false);
@@ -298,34 +294,52 @@ export default function App() {
     return () => { unsubConfig(); unsubProducts(); unsubOrders(); };
   }, [user]);
 
+  const getStockLimit = (id: string) => {
+    const prod = assets.products.find(p => p.id === id);
+    return prod?.stock ?? 999999;
+  };
+
   const totals = useMemo(() => {
     const itemsTotal = assets.products.reduce((sum: number, p) => sum + (Number(cart[p.id]) || 0) * p.price, 0);
     const cardPrice = greeting.type === 'hasCard' ? 0.5 : 0;
     return { 
-      final: Math.max(0, itemsTotal + cardPrice),
+      final: Math.max(0, itemsTotal + cardPrice + tipAmount),
       count: Object.values(cart).reduce((a: number, b: number) => a + b, 0)
     };
-  }, [cart, greeting, assets.products]);
+  }, [cart, greeting, assets.products, tipAmount]);
 
   const showToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(''), 3000);
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, callback: (base64: string) => void) => {
+  const uploadToStorage = async (file: File, path: string): Promise<string> => {
+    const fileRef = ref(storage, path);
+    await uploadBytesResumable(fileRef, file);
+    return await getDownloadURL(fileRef);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, callback: (url: string) => void) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    
-    // Limit to 300KB. Base64 encoding adds ~33% size. 
-    // We want to avoid hitting the 1MB Firestore document limit,
-    // especially when multiple images are stored in a single document (like qrCodes).
-    if (file.size > 300 * 1024) { 
-      showToast(lang === 'zh' ? "图片过大（最大300KB）" : "Image too large (Max 300KB)");
+
+    if (file.size > 5 * 1024 * 1024) { 
+      showToast(lang === 'zh' ? "图片过大（最大5MB）" : "Image too large (Max 5MB)");
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (ev) => callback(ev.target?.result as string);
-    reader.readAsDataURL(file);
+
+    setActionLoading(true);
+    try {
+      const ext = file.name.split('.').pop();
+      const path = `uploads/${Date.now()}_${Math.random().toString(36).substring(2)}.${ext}`;
+      const url = await uploadToStorage(file, path);
+      callback(url);
+    } catch (error) {
+      console.error("Upload failed", error);
+      showToast("Upload failed");
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const updateShopConfig = async (newConfig: ShopConfig) => {
@@ -337,7 +351,6 @@ export default function App() {
       // Save Config (QR Codes)
       console.log("Adding config qrCodes to batch for settings/config...");
       const configRef = doc(db, `${DATA_PATH}/settings/config`);
-      // Warning: Base64 images for qrCodes can hit the 1MB Firestore document limit
       batch.set(configRef, { qrCodes: newConfig.qrCodes }, { merge: true });
       
       // Save Products individually
@@ -369,9 +382,11 @@ export default function App() {
       .filter(p => cart[p.id] > 0)
       .map(p => `${p.nameEn} x${cart[p.id]}${p.id === 'mystery' && customization.isKpop ? ' (K-Pop Ver)' : ''}`)
       .join(', ');
+      
+    const tipStr = tipAmount > 0 ? `\nTip: RM${tipAmount.toFixed(2)}` : '';
     
     const message = `Hi CvL Co.!
-Order: ${itemsStr}
+Order: ${itemsStr || 'Donation Only'}${tipStr}
 Total: RM${totals.final.toFixed(2)}
 Customer: ${customer.name} (@${customer.ig})`;
 
@@ -380,13 +395,13 @@ Customer: ${customer.name} (@${customer.ig})`;
 
   const handleOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (totals.count === 0) return showToast(lang === 'zh' ? "请至少选择一件商品" : "Select at least one item");
+    if (totals.count === 0 && tipAmount === 0) return showToast(lang === 'zh' ? "请至少选择一件商品或打赏" : "Select at least one item or leave a tip");
     
     // Inventory Verification
     let isOversold = false;
     Object.entries(cart).forEach(([id, qty]) => {
       const q = Number(qty);
-      if (q > 0 && ((stockLevels[id] || 0) + q) > STOCK_LIMITS[id]) {
+      if (q > 0 && ((stockLevels[id] || 0) + q) > getStockLimit(id)) {
         isOversold = true;
       }
     });
@@ -405,6 +420,7 @@ Customer: ${customer.name} (@${customer.ig})`;
           message: greeting.message
         }, 
         customization, 
+        tip: tipAmount,
         totals, 
         status: 'pending_payment', 
         createdAt: serverTimestamp(), 
@@ -469,10 +485,20 @@ Customer: ${customer.name} (@${customer.ig})`;
               <Sparkles size={14}/> {t.itemsTitle}
             </h2>
             <div className="grid grid-cols-1 gap-5">
-              {assets.products.map(p => {
-                const isSoldOut = stockLevels[p.id] >= STOCK_LIMITS[p.id];
+              {assets.products.slice().sort((a,b) => (a.order || 0) - (b.order || 0)).map(p => {
+                const stockLimit = p.stock ?? 999999;
+                const isSoldOut = (stockLevels[p.id] || 0) >= stockLimit;
                 return (
-                  <div key={p.id} className={`bg-white rounded-[2.5rem] p-5 flex flex-col shadow-sm border border-gray-100 overflow-hidden transition-all ${isSoldOut ? 'opacity-60' : ''}`}>
+                  <div 
+                    key={p.id} 
+                    onClick={() => {
+                      if (!isSoldOut) {
+                        setSelectedProduct(p);
+                        setIsProductModalOpen(true);
+                      }
+                    }}
+                    className={`bg-white rounded-[2.5rem] p-5 flex flex-col shadow-sm border border-gray-100 overflow-hidden transition-all ${isSoldOut ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer hover:shadow-md hover:border-[#D4B996]'}`}
+                  >
                     <div className="flex items-center gap-6">
                       <div className="w-24 h-24 rounded-3xl overflow-hidden shrink-0 bg-gray-50 flex items-center justify-center border border-gray-100 relative">
                         {p.img ? <img src={p.img} className="w-full h-full object-cover" /> : <div className="p-4 bg-gray-50"><ImageIcon size={30} className="text-[#D4B996]/40" /></div>}
@@ -485,39 +511,11 @@ Customer: ${customer.name} (@${customer.ig})`;
                       <div className="flex-1">
                         <h3 className="font-serif text-lg text-[#2D241E]">{lang === 'en' ? p.nameEn : p.nameZh}</h3>
                         <p className="text-[#8B4513] font-bold">RM{p.price.toFixed(2)}</p>
-                      </div>
-                      <div className="flex flex-col items-center gap-2 bg-[#FAF9F6] rounded-3xl p-2">
-                        <button 
-                          disabled={isSoldOut || (stockLevels[p.id] + (cart[p.id] || 0) >= STOCK_LIMITS[p.id])}
-                          onClick={() => setCart(c => ({...c, [p.id]: (c[p.id]||0) + 1}))} 
-                          className="w-8 h-8 rounded-xl bg-white font-bold disabled:opacity-20 shadow-sm"
-                        >
-                          +
-                        </button>
-                        <span className="font-black text-xs">{cart[p.id] || 0}</span>
-                        <button 
-                          onClick={() => setCart(c => ({...c, [p.id]: Math.max(0, (c[p.id]||0) - 1)}))} 
-                          className="w-8 h-8 rounded-xl bg-white font-bold shadow-sm"
-                        >
-                          -
-                        </button>
+                        {cart[p.id] > 0 && (
+                          <p className="text-[10px] font-black text-[#D4B996] uppercase mt-2">In Cart: {cart[p.id]}</p>
+                        )}
                       </div>
                     </div>
-                    {/* Mystery Box Specific Option */}
-                    {p.id === 'mystery' && cart.mystery > 0 && (
-                      <div className="mt-4 pt-4 border-t border-dashed border-gray-100 flex items-center justify-between px-2">
-                        <span className="text-[10px] font-black uppercase text-[#D4B996] tracking-widest flex items-center gap-2">
-                          <Music size={12}/> {t.kpopOption}
-                        </span>
-                        <button 
-                          type="button"
-                          onClick={() => setCustomization(prev => ({...prev, isKpop: !prev.isKpop}))}
-                          className={`w-10 h-6 rounded-full transition-all relative ${customization.isKpop ? 'bg-[#D4B996]' : 'bg-gray-200'}`}
-                        >
-                          <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${customization.isKpop ? 'left-5' : 'left-1'}`} />
-                        </button>
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -654,6 +652,43 @@ Customer: ${customer.name} (@${customer.ig})`;
                   {greeting.type !== 'none' && (
                     <textarea placeholder={t.messagePlaceholder} className="w-full bg-[#FAF9F6] rounded-[1.5rem] p-6 text-sm h-32 outline-none border-2 border-transparent focus:border-[#D4B996] resize-none" value={greeting.message} onChange={e => setGreeting({...greeting, message: e.target.value})} />
                   )}
+                </div>
+
+                <div className="pt-6 border-t border-gray-50 space-y-4">
+                  <label className="text-[10px] uppercase font-black tracking-[0.2em] text-[#D4B996] flex items-center gap-2">
+                    ☕ Support the shop (Give me a coffee)
+                  </label>
+                  <div className="grid grid-cols-4 gap-3">
+                     {[1, 2, 5].map(amt => (
+                       <button
+                         key={amt}
+                         type="button"
+                         onClick={() => {
+                           setTipAmount(amt);
+                           setCustomTip('');
+                         }}
+                         className={`py-3 rounded-xl font-bold text-sm transition-all border-2 ${tipAmount === amt && !customTip ? 'bg-[#D4B996] text-white border-[#D4B996]' : 'bg-[#FAF9F6] text-[#2D241E] border-transparent hover:border-[#D4B996]'}`}
+                       >
+                         RM{amt}
+                       </button>
+                     ))}
+                     <div className="relative">
+                       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 font-bold text-sm">RM</span>
+                       <input 
+                         type="number" 
+                         step="0.01"
+                         min="0"
+                         className={`w-full py-3 pl-10 pr-3 rounded-xl font-bold text-sm outline-none border-2 transition-all ${customTip ? 'border-[#D4B996] bg-white' : 'bg-[#FAF9F6] border-transparent focus:border-[#D4B996]'}`}
+                         placeholder="Custom"
+                         value={customTip}
+                         onChange={(e) => {
+                           setCustomTip(e.target.value);
+                           const val = parseFloat(e.target.value);
+                           setTipAmount(isNaN(val) ? 0 : val);
+                         }}
+                       />
+                     </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -835,26 +870,36 @@ Customer: ${customer.name} (@${customer.ig})`;
                     <div className="space-y-6">
                       <div className="bg-[#FAF9F6] p-6 rounded-2xl">
                         <h4 className="text-[10px] font-black uppercase tracking-widest text-[#D4B996] mb-4 border-b border-gray-200 pb-2">Order Items</h4>
-                        {Object.entries(order.cart || {}).map(([id, qty]) => {
-                          const q = Number(qty);
-                          if (q === 0) return null;
-                          const prod = assets.products.find(p => p.id === id);
-                          return (
-                            <div key={id} className="flex flex-col gap-1 mb-2">
-                              <div className="flex justify-between text-xs font-bold">
-                                <span>{prod?.nameEn} x {q}</span>
-                                <span>RM{((prod?.price || 0) * q).toFixed(2)}</span>
+                        {(order.totals?.count || 0) === 0 ? (
+                          <div className="text-xs font-bold text-gray-500 italic mb-4">Donation Only Order</div>
+                        ) : (
+                          Object.entries(order.cart || {}).map(([id, qty]) => {
+                            const q = Number(qty);
+                            if (q === 0) return null;
+                            const prod = assets.products.find(p => p.id === id);
+                            return (
+                              <div key={id} className="flex flex-col gap-1 mb-2">
+                                <div className="flex justify-between text-xs font-bold">
+                                  <span>{prod?.nameEn} x {q}</span>
+                                  <span>RM{((prod?.price || 0) * q).toFixed(2)}</span>
+                                </div>
+                                {id === 'mystery' && order.customization?.isKpop && (
+                                  <span className="text-[9px] bg-purple-100 text-purple-600 px-2 py-0.5 rounded-full self-start font-black uppercase">K-Pop Version</span>
+                                )}
                               </div>
-                              {id === 'mystery' && order.customization?.isKpop && (
-                                <span className="text-[9px] bg-purple-100 text-purple-600 px-2 py-0.5 rounded-full self-start font-black uppercase">K-Pop Version</span>
-                              )}
-                            </div>
-                          );
-                        })}
+                            );
+                          })
+                        )}
                         <div className="pt-2 border-t border-gray-200 flex justify-between font-black text-sm text-[#8B4513]">
                           <span>Total</span>
                           <span>RM{order.totals?.final?.toFixed(2)}</span>
                         </div>
+                        {order.tip > 0 && (
+                          <div className="pt-1 flex justify-between font-black text-[10px] text-gray-400">
+                            <span>Includes Tip (Coffee)</span>
+                            <span>RM{order.tip?.toFixed(2)}</span>
+                          </div>
+                        )}
                       </div>
 
                       <div className="bg-[#FAF9F6] p-6 rounded-2xl border-l-4 border-[#D4B996]">
@@ -919,31 +964,165 @@ Customer: ${customer.name} (@${customer.ig})`;
           
           <div className="bg-white rounded-[3rem] p-10 shadow-xl space-y-12">
             <div>
-              <h2 className="text-2xl font-serif text-[#2D241E] mb-6">Products & QRs</h2>
-              <div className="grid grid-cols-1 gap-6">
-                {assets.products.map((p, idx) => (
-                  <div key={p.id} className="flex items-center gap-4 p-4 bg-[#FAF9F6] rounded-3xl">
-                    <div className="w-16 h-16 rounded-xl bg-white flex items-center justify-center overflow-hidden border">
-                      {p.img ? <img src={p.img} className="w-full h-full object-cover" alt={p.nameEn} /> : <ImageIcon className="text-gray-200" />}
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-2xl font-serif text-[#2D241E]">Products</h2>
+                <button
+                  onClick={async () => {
+                    const newProduct: Product = {
+                      id: `prod_${Date.now()}`,
+                      nameEn: 'New Product',
+                      nameZh: '新产品',
+                      price: 0,
+                      stock: 10,
+                      img: '',
+                      description: '',
+                      order: assets.products.length > 0 ? Math.max(...assets.products.map(p => p.order || 0)) + 1 : 0
+                    };
+                    try {
+                      await setDoc(doc(db, `${DATA_PATH}/products/${newProduct.id}`), newProduct);
+                    } catch (err) {
+                      console.error("Create product failed", err);
+                      showToast("Create product failed");
+                    }
+                  }}
+                  className="bg-[#D4B996] text-white p-2 rounded-xl"
+                >
+                  <Plus size={20} />
+                </button>
+              </div>
+              <div className="flex flex-col gap-4">
+                {assets.products.slice().sort((a,b) => (a.order || 0) - (b.order || 0)).map((p, displayIndex, sortedArray) => {
+                  const idx = assets.products.findIndex(ap => ap.id === p.id);
+                  return (
+                  <div key={p.id} className="flex flex-col gap-4 p-6 bg-[#FAF9F6] rounded-3xl relative">
+                    <div className="absolute top-4 right-4 flex flex-col gap-1">
+                       <button 
+                         disabled={displayIndex === 0}
+                         className="p-1 text-gray-400 hover:text-black disabled:opacity-30"
+                         onClick={async () => {
+                           if (displayIndex === 0) return;
+                           const n = [...assets.products];
+                           const prevIdx = assets.products.findIndex(ap => ap.id === sortedArray[displayIndex - 1].id);
+                           const temp = n[idx].order;
+                           n[idx].order = n[prevIdx].order ?? 0;
+                           n[prevIdx].order = temp ?? 0;
+                           setAssets({...assets, products: n});
+                           
+                           try {
+                             const batch = writeBatch(db);
+                             batch.set(doc(db, `${DATA_PATH}/products/${n[idx].id}`), n[idx]);
+                             batch.set(doc(db, `${DATA_PATH}/products/${n[prevIdx].id}`), n[prevIdx]);
+                             await batch.commit();
+                           } catch (err) {
+                             console.error("Move UP auto-save failed", err);
+                           }
+                         }}
+                       >
+                         <ChevronUp size={20}/>
+                       </button>
+                       <button 
+                         disabled={displayIndex === sortedArray.length - 1}
+                         className="p-1 text-gray-400 hover:text-black disabled:opacity-30"
+                         onClick={async () => {
+                           if (displayIndex === sortedArray.length - 1) return;
+                           const n = [...assets.products];
+                           const nextIdx = assets.products.findIndex(ap => ap.id === sortedArray[displayIndex + 1].id);
+                           const temp = n[idx].order;
+                           n[idx].order = n[nextIdx].order ?? 0;
+                           n[nextIdx].order = temp ?? 0;
+                           setAssets({...assets, products: n});
+                           
+                           try {
+                             const batch = writeBatch(db);
+                             batch.set(doc(db, `${DATA_PATH}/products/${n[idx].id}`), n[idx]);
+                             batch.set(doc(db, `${DATA_PATH}/products/${n[nextIdx].id}`), n[nextIdx]);
+                             await batch.commit();
+                           } catch (err) {
+                             console.error("Move DOWN auto-save failed", err);
+                           }
+                         }}
+                       >
+                         <ChevronDown size={20}/>
+                       </button>
                     </div>
-                    <div className="flex-1">
-                      <p className="text-xs font-bold">{p.nameEn}</p>
-                      <p className="text-[10px] text-gray-400">Stock Used: {stockLevels[p.id]} / {STOCK_LIMITS[p.id]}</p>
+
+                    <div className="flex gap-6 pr-12">
+                      <div className="flex flex-col gap-2 relative group">
+                        <div className="w-24 h-24 rounded-2xl bg-white flex items-center justify-center overflow-hidden border">
+                          {p.img ? <img src={p.img} className="w-full h-full object-cover" alt={p.nameEn} /> : <ImageIcon className="text-gray-200" />}
+                        </div>
+                        <label className="absolute inset-0 bg-black/40 text-white rounded-2xl opacity-0 group-hover:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
+                          <Upload size={24} />
+                          <input 
+                            type="file" 
+                            className="hidden" 
+                            onChange={(e) => handleFileUpload(e, (url) => {
+                              const n = [...assets.products]; 
+                              n[idx].img = url; 
+                              setAssets({...assets, products: n});
+                            })} 
+                          />
+                        </label>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4 flex-1">
+                        <div>
+                           <label className="text-[10px] text-gray-400 font-bold uppercase">Name (EN)</label>
+                           <input className="w-full px-3 py-2 bg-white rounded-xl border-2 border-transparent focus:border-[#D4B996] outline-none text-sm" value={p.nameEn} onChange={(e) => { const n = [...assets.products]; n[idx].nameEn = e.target.value; setAssets({...assets, products: n}); }} />
+                        </div>
+                        <div>
+                           <label className="text-[10px] text-gray-400 font-bold uppercase">Name (ZH)</label>
+                           <input className="w-full px-3 py-2 bg-white rounded-xl border-2 border-transparent focus:border-[#D4B996] outline-none text-sm" value={p.nameZh} onChange={(e) => { const n = [...assets.products]; n[idx].nameZh = e.target.value; setAssets({...assets, products: n}); }} />
+                        </div>
+                        <div>
+                           <label className="text-[10px] text-gray-400 font-bold uppercase">Price (RM)</label>
+                           <input type="number" className="w-full px-3 py-2 bg-white rounded-xl border-2 border-transparent focus:border-[#D4B996] outline-none text-sm" value={p.price} onChange={(e) => { const n = [...assets.products]; n[idx].price = parseFloat(e.target.value) || 0; setAssets({...assets, products: n}); }} />
+                        </div>
+                        <div>
+                           <label className="text-[10px] text-gray-400 font-bold uppercase">Stock Limit (∞ = 999999)</label>
+                           <input type="number" className="w-full px-3 py-2 bg-white rounded-xl border-2 border-transparent focus:border-[#D4B996] outline-none text-sm" value={p.stock} onChange={(e) => { const n = [...assets.products]; n[idx].stock = parseInt(e.target.value) || 0; setAssets({...assets, products: n}); }} />
+                           <p className="text-[9px] text-gray-400 mt-1 uppercase">Used: {stockLevels[p.id] || 0}</p>
+                        </div>
+                        <div>
+                           <label className="text-[10px] text-gray-400 font-bold uppercase">Order (Sort Pos)</label>
+                           <input type="number" className="w-full px-3 py-2 bg-white rounded-xl border-2 border-transparent focus:border-[#D4B996] outline-none text-sm" value={p.order ?? 0} onChange={(e) => { const n = [...assets.products]; n[idx].order = parseInt(e.target.value) || 0; setAssets({...assets, products: n}); }} />
+                        </div>
+                        <div className="col-span-1">
+                           <label className="text-[10px] text-gray-400 font-bold uppercase">Description</label>
+                           <textarea className="w-full px-3 py-2 bg-white rounded-xl border-2 border-transparent focus:border-[#D4B996] outline-none text-sm h-10 resize-none" value={p.description || ''} onChange={(e) => { const n = [...assets.products]; n[idx].description = e.target.value; setAssets({...assets, products: n}); }} />
+                        </div>
+                      </div>
                     </div>
-                    <label className="p-3 bg-white rounded-xl shadow-sm cursor-pointer hover:bg-blue-50">
-                      <Upload size={16} className="text-blue-500" />
-                      <input 
-                        type="file" 
-                        className="hidden" 
-                        onChange={(e) => handleFileUpload(e, (base64) => {
-                          const n = [...assets.products]; 
-                          n[idx].img = base64; 
-                          setAssets({...assets, products: n});
-                        })} 
-                      />
-                    </label>
+                    
+                    <div className="flex justify-end pt-4 border-t border-[#D4B996]/20">
+                      <button 
+                         className="flex items-center gap-2 text-xs font-bold text-red-500 hover:text-red-700"
+                         onClick={async (e) => {
+                           if ((e.target as HTMLButtonElement).innerText === 'Confirm Delete?') {
+                             setActionLoading(true);
+                             try {
+                               const pRef = doc(db, `${DATA_PATH}/products/${p.id}`);
+                               await deleteDoc(pRef);
+                               const n = assets.products.filter(ap => ap.id !== p.id);
+                               setAssets({...assets, products: n});
+                             } catch(err) {
+                               console.error(err);
+                               showToast('Delete failed');
+                             }
+                             setActionLoading(false);
+                           } else {
+                             (e.target as HTMLButtonElement).innerText = 'Confirm Delete?';
+                             setTimeout(() => {
+                               if (e.target) (e.target as HTMLButtonElement).innerText = 'Delete Product';
+                             }, 3000);
+                           }
+                         }}
+                      >
+                         <Trash2 size={16} className="pointer-events-none" /> Delete Product
+                      </button>
+                    </div>
                   </div>
-                ))}
+                )})}
               </div>
             </div>
 
@@ -988,6 +1167,83 @@ Customer: ${customer.name} (@${customer.ig})`;
         <footer className="py-24 text-center">
           <button onClick={() => setView('admin-login')} className="text-[10px] font-black uppercase tracking-[0.3em] text-[#D4B996] cursor-pointer hover:text-[#2D241E] transition-colors">Admin Login</button>
         </footer>
+      )}
+
+      {/* --- PRODUCT MODAL --- */}
+      {isProductModalOpen && selectedProduct && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-[3rem] w-full max-w-md overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="relative h-64 bg-gray-50 flex items-center justify-center shrink-0">
+              {selectedProduct.img ? (
+                <img src={selectedProduct.img} className="w-full h-full object-cover" alt="Product" />
+              ) : (
+                <ImageIcon size={60} className="text-[#D4B996]/30" />
+              )}
+              <button 
+                onClick={() => setIsProductModalOpen(false)}
+                className="absolute top-4 right-4 w-10 h-10 bg-white/80 backdrop-blur rounded-full flex items-center justify-center shadow-sm text-gray-600 hover:bg-white hover:text-black transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-8 overflow-y-auto flex-1">
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <h2 className="text-2xl font-serif text-[#2D241E]">{lang === 'en' ? selectedProduct.nameEn : selectedProduct.nameZh}</h2>
+                  <p className="text-xl font-bold text-[#8B4513] mt-1">RM{selectedProduct.price.toFixed(2)}</p>
+                </div>
+              </div>
+              
+              {selectedProduct.description && (
+                <p className="text-sm text-gray-500 mb-6 leading-relaxed whitespace-pre-wrap">
+                  {selectedProduct.description}
+                </p>
+              )}
+              
+              {selectedProduct.id === 'mystery' && (
+                <div className="mb-8 p-4 bg-[#FAF9F6] rounded-2xl border border-dashed border-[#D4B996] flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase text-[#D4B996] tracking-widest flex items-center gap-2">
+                    <Music size={14}/> {t.kpopOption}
+                  </span>
+                  <button 
+                    type="button"
+                    onClick={() => setCustomization(prev => ({...prev, isKpop: !prev.isKpop}))}
+                    className={`w-12 h-7 rounded-full transition-all relative shadow-inner ${customization.isKpop ? 'bg-[#D4B996]' : 'bg-gray-200'}`}
+                  >
+                    <div className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-all shadow-sm ${customization.isKpop ? 'left-6' : 'left-1'}`} />
+                  </button>
+                </div>
+              )}
+              
+              <div className="mt-auto space-y-4">
+                <div className="flex items-center justify-center gap-6 p-4 bg-[#FAF9F6] rounded-3xl">
+                  <button 
+                    onClick={() => setCart(c => ({...c, [selectedProduct.id]: Math.max(0, (c[selectedProduct.id]||0) - 1)}))} 
+                    className="w-12 h-12 rounded-2xl bg-white font-bold text-xl shadow-sm text-[#2D241E]"
+                  >
+                    -
+                  </button>
+                  <span className="font-black text-2xl w-10 text-center">{cart[selectedProduct.id] || 0}</span>
+                  <button 
+                    disabled={(stockLevels[selectedProduct.id] || 0) + (cart[selectedProduct.id] || 0) >= (selectedProduct.stock ?? 999999)}
+                    onClick={() => setCart(c => ({...c, [selectedProduct.id]: (c[selectedProduct.id]||0) + 1}))} 
+                    className="w-12 h-12 rounded-2xl bg-white font-bold text-xl shadow-sm text-[#2D241E] disabled:opacity-30"
+                  >
+                    +
+                  </button>
+                </div>
+                
+                <button 
+                  onClick={() => setIsProductModalOpen(false)}
+                  className="w-full bg-[#2D241E] text-white py-5 rounded-2xl font-black text-sm tracking-widest shadow-xl cursor-pointer hover:bg-[#3D342E]"
+                >
+                  {(cart[selectedProduct.id] || 0) > 0 ? "ADD TO CART" : "CLOSE"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

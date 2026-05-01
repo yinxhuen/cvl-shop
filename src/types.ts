@@ -3,7 +3,10 @@ export interface Product {
   nameEn: string;
   nameZh: string;
   price: number;
+  stock: number;
   img: string;
+  description: string;
+  order: number;
 }
 
 export interface Customer {
@@ -31,6 +34,7 @@ export interface Order {
   cart: Record<string, number>;
   greeting: Greeting;
   customization: Customization;
+  tip: number;
   totals: {
     final: number;
     count: number;
