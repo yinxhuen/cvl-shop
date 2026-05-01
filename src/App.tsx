@@ -169,6 +169,7 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [view, setView] = useState('home'); 
   const [loading, setLoading] = useState(true);
+  const [initialError, setInitialError] = useState<string | null>(null);
 
   const [assets, setAssets] = useState<ShopConfig>({
     products: [],
@@ -213,6 +214,9 @@ export default function App() {
       if (!u) {
         signInAnonymously(auth).catch(err => {
           console.error("Anonymous auth error:", err);
+          // Even if auth fails, we should stop the initial loader
+          // so the user can at least see the app (even if limited)
+          setLoading(false);
         });
       } else {
         setUser(u);
@@ -220,7 +224,16 @@ export default function App() {
         console.log("Authenticated as:", u.uid);
       }
     });
-    return () => unsubscribe();
+    
+    // Safety timeout: stop loading after 10 seconds regardless
+    const timeout = setTimeout(() => {
+      setLoading(false);
+    }, 10000);
+
+    return () => {
+      unsubscribe();
+      clearTimeout(timeout);
+    };
   }, []);
 
   // Removed handleLogin (using anonymous auth automatically)
@@ -242,7 +255,11 @@ export default function App() {
   // --- Data Listeners ---
   useEffect(() => {
     if (!user) return;
-    setLoading(true);
+    
+    // Only show loader if we don't have products yet
+    if (assets.products.length === 0) {
+      setLoading(true);
+    }
 
     const configRef = doc(db, `${DATA_PATH}/settings/config`);
     const unsubConfig = onSnapshot(configRef, (snapshot) => {
@@ -264,6 +281,7 @@ export default function App() {
       setLoading(false);
     }, (err) => {
       setLoading(false);
+      setInitialError("Database connection failed. Please check your network or Firebase rules.");
       handleFirestoreError(err, OperationType.LIST, `${DATA_PATH}/products`);
     });
 
@@ -443,7 +461,22 @@ Customer: ${customer.name} (@${customer.ig})`;
     setActionLoading(false);
   };
 
-  if (loading) return <div className="h-screen flex items-center justify-center font-serif text-[#D4B996] animate-pulse italic">CVL CO. IS LOADING...</div>;
+  if (loading) return (
+    <div className="h-screen flex flex-col items-center justify-center font-serif text-[#D4B996] space-y-4">
+      <div className="animate-pulse italic text-lg tracking-widest">CVL CO. IS LOADING...</div>
+      {initialError && (
+        <div className="max-w-xs text-center text-[10px] text-red-400 font-sans uppercase tracking-widest leading-relaxed">
+          {initialError}
+          <button 
+            onClick={() => window.location.reload()}
+            className="block mt-4 mx-auto bg-[#D4B996] text-white px-4 py-2 rounded-lg font-black text-[9px]"
+          >
+            REFRESH PAGE
+          </button>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="min-h-screen">
