@@ -1,0 +1,14 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;600&family=Outfit:wght@300;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Noto Serif SC", serif;
+}
+
+@layer base {
+  body {
+    @apply font-sans bg-[#FAF9F6] text-[#4A4036];
+  }
+}
+
