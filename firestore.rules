@@ -18,7 +18,10 @@ service cloud.firestore {
     // However, the user provided code depends on being able to write to config/orders from the client.
     
     function isAdmin() { 
-      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'yinxhuen@gmail.com'
+      );
     }
 
     match /artifacts/{appId}/public/data {

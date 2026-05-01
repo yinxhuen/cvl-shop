@@ -6,7 +6,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   signInAnonymously, 
-  onAuthStateChanged
+  onAuthStateChanged,
+  GoogleAuthProvider,
+  signInWithPopup
 } from 'firebase/auth';
 import { 
   collection, 
@@ -590,6 +592,7 @@ Customer: ${customer.name} (@${customer.ig})`;
                           <img 
                             src={p.img} 
                             className="w-full h-full object-cover" 
+                            referrerPolicy="no-referrer"
                             onError={(e) => {
                               (e.target as HTMLImageElement).src = 'https://placehold.co/400x400/FAF9F6/D4B996?text=CREATION';
                             }}
@@ -631,7 +634,7 @@ Customer: ${customer.name} (@${customer.ig})`;
                   <div className="relative border-2 border-dashed border-[#D4B996]/40 rounded-[2rem] p-8 bg-[#FAF9F6] flex flex-col items-center text-center">
                     <input type="file" required accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => handleFileUpload(e, (base64) => setCustomization(prev => ({...prev, artImage: base64})))} />
                     {customization.artImage ? (
-                      <img src={customization.artImage} className="h-32 rounded-xl shadow-lg" alt="Custom Art"/>
+                      <img src={customization.artImage} referrerPolicy="no-referrer" className="h-32 rounded-xl shadow-lg" alt="Custom Art"/>
                     ) : (
                       <>
                         <Upload size={24} className="mb-2 text-[#D4B996]"/>
@@ -873,7 +876,30 @@ Customer: ${customer.name} (@${customer.ig})`;
                 setIsAdmin(true); setView('admin-dashboard');
               } else showToast("Denied");
             }} className="w-full bg-[#2D241E] text-white py-5 rounded-2xl font-black text-xs cursor-pointer">AUTHENTICATE</button>
-            <button onClick={() => setView('home')} className="w-full text-center text-xs text-gray-400 cursor-pointer">Cancel</button>
+            <div className="space-y-4 pt-4 border-t border-gray-100">
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-200"></div></div>
+                <div className="relative flex justify-center text-[10px]"><span className="px-3 bg-white text-gray-400 font-bold uppercase tracking-widest">Or Secure Admin Session</span></div>
+              </div>
+              <button 
+                onClick={async () => {
+                  try {
+                    const provider = new GoogleAuthProvider();
+                    await signInWithPopup(auth, provider);
+                    setIsAdmin(true); 
+                    setView('admin-dashboard');
+                  } catch (err) {
+                    console.error("Google Admin Login error:", err);
+                    showToast("Google Auth Failed");
+                  }
+                }}
+                className="w-full bg-white text-[#2D241E] py-5 rounded-2xl font-black text-xs tracking-widest shadow-md border border-gray-100 flex items-center justify-center gap-3 hover:bg-gray-50 transition-colors"
+              >
+                <LogIn size={18}/>
+                SIGN IN WITH GOOGLE
+              </button>
+            </div>
+            <button onClick={() => setView('home')} className="w-full text-center text-xs text-gray-400 cursor-pointer pt-4 uppercase font-black tracking-widest">Cancel</button>
           </div>
         </div>
       )}
@@ -1235,6 +1261,7 @@ Customer: ${customer.name} (@${customer.ig})`;
                   src={selectedProduct.img} 
                   className="w-full h-full object-cover" 
                   alt="Product" 
+                  referrerPolicy="no-referrer"
                   onError={(e) => {
                     (e.target as HTMLImageElement).src = 'https://placehold.co/800x800/FAF9F6/D4B996?text=IMAGE+ERROR';
                   }}
@@ -1254,7 +1281,10 @@ Customer: ${customer.name} (@${customer.ig})`;
               <div className="flex justify-between items-start mb-4">
                 <div>
                   <h2 className="text-2xl font-serif text-[#2D241E]">{lang === 'en' ? selectedProduct.nameEn : selectedProduct.nameZh}</h2>
-                  <p className="text-xl font-bold text-[#8B4513] mt-1">RM{selectedProduct.price.toFixed(2)}</p>
+                  {selectedProduct.description && (
+                    <p className="text-xs text-gray-400 font-sans mt-2 italic leading-relaxed">{selectedProduct.description}</p>
+                  )}
+                  <p className="text-xl font-bold text-[#8B4513] mt-2">RM{selectedProduct.price.toFixed(2)}</p>
                 </div>
               </div>
               
