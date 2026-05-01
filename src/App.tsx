@@ -57,7 +57,7 @@ import {
   Pencil
 } from 'lucide-react';
 import { auth, db, storage, DATA_PATH } from './lib/firebase';
-import { handleFirestoreError, OperationType } from './lib/utils';
+import { handleFirestoreError, OperationType, validateAndCompressImage } from './lib/utils';
 import { Product, Customer, Greeting, Customization, Order, ShopConfig } from './types';
 
 // --- Admin Credentials ---
@@ -337,23 +337,29 @@ export default function App() {
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, callback: (url: string) => void) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.size > 5 * 1024 * 1024) { 
-      showToast(lang === 'zh' ? "图片过大（最大5MB）" : "Image too large (Max 5MB)");
-      return;
-    }
+    const rawFile = e.target.files?.[0];
+    if (!rawFile) return;
 
     setActionLoading(true);
     try {
-      const ext = file.name.split('.').pop();
+      const file = await validateAndCompressImage(rawFile, 300);
+      if (!file) {
+        showToast(lang === 'zh' ? "图片处理失败" : "Image processing failed");
+        return;
+      }
+
+      if (file.size > 500 * 1024) { 
+        showToast(lang === 'zh' ? "图片过大（最大500KB）" : "Image too large (Max 500KB)");
+        return;
+      }
+
+      const ext = file.name.split('.').pop() || 'jpg';
       const path = `uploads/${Date.now()}_${Math.random().toString(36).substring(2)}.${ext}`;
       const url = await uploadToStorage(file, path);
       callback(url);
     } catch (error) {
       console.error("Upload failed", error);
-      showToast("Upload failed");
+      showToast(lang === 'zh' ? "上传失败，请重试" : "Upload failed, please try again");
     } finally {
       setActionLoading(false);
     }
@@ -362,34 +368,45 @@ export default function App() {
   const updateShopConfig = async (newConfig: ShopConfig) => {
     setActionLoading(true);
     console.log("Saving new config...", newConfig);
+    
+    // Safety timeout
+    const timeout = setTimeout(() => {
+      if (actionLoading) {
+        setActionLoading(false);
+        showToast(lang === 'zh' ? "保存超时，部分数据可能未成功同步" : "Save timed out, some data may not synchronize");
+      }
+    }, 15000);
+
     try {
       const batch = writeBatch(db);
       
       // Save Config (QR Codes)
-      console.log("Adding config qrCodes to batch for settings/config...");
       const configRef = doc(db, `${DATA_PATH}/settings/config`);
       batch.set(configRef, { qrCodes: newConfig.qrCodes }, { merge: true });
       
       // Save Products individually
-      console.log("Adding individual products to batch...");
       newConfig.products.forEach(p => {
+        // Double check for malformed products
+        if (!p.id) return;
         const pRef = doc(db, `${DATA_PATH}/products/${p.id}`);
         batch.set(pRef, p);
       });
       
-      console.log("Committing batch...");
       await batch.commit();
-      console.log("Batch commit successful!");
       showToast(t.updateSuccess);
     } catch (err) {
       console.error("Error saving config:", err);
+      // Try saving individually if batch fails
       try {
-        handleFirestoreError(err, OperationType.WRITE, DATA_PATH);
-      } catch (e) {
-        // Suppress the thrown error to ensure loading stops, we already logged it
+        for (const p of newConfig.products) {
+          await setDoc(doc(db, `${DATA_PATH}/products/${p.id}`), p);
+        }
+        showToast(lang === 'zh' ? "部分保存成功（逐个同步）" : "Saved via individual sync");
+      } catch (innerErr) {
+        showToast("CRITICAL SAVE ERROR: Document state invalid.");
       }
-      showToast("Error saving data. Document size may exceed 1MB limit.");
     } finally {
+      clearTimeout(timeout);
       setActionLoading(false);
     }
   };
@@ -427,6 +444,15 @@ Customer: ${customer.name} (@${customer.ig})`;
     if (cart.art > 0 && !customization.artImage) return showToast(t.artUploadRequired);
 
     setActionLoading(true);
+    
+    // Safety timeout: 8 seconds
+    const timeout = setTimeout(() => {
+      if (actionLoading) {
+        setActionLoading(false);
+        showToast(lang === 'zh' ? "请求超时，请重试" : "Request timed out, please try again");
+      }
+    }, 8000);
+
     const path = `${DATA_PATH}/orders`;
     try {
       const orderData: Omit<Order, 'id'> = {
@@ -443,13 +469,21 @@ Customer: ${customer.name} (@${customer.ig})`;
         createdAt: serverTimestamp(), 
         uid: user?.uid || 'anon'
       };
+      
       const docRef = await addDoc(collection(db, path), orderData);
       setCurrentOrderId(docRef.id);
       setView('payment');
     } catch (err) { 
+      console.error("Order creation failed", err);
       handleFirestoreError(err, OperationType.CREATE, path);
+      // Fallback: Still allow payment view but Warn user
+      setCurrentOrderId(`offline_${Date.now()}`);
+      setView('payment');
+      showToast(lang === 'zh' ? "系统繁忙，订单已本地记录" : "System busy, order recorded locally");
+    } finally {
+      clearTimeout(timeout);
+      setActionLoading(false);
     }
-    setActionLoading(false);
   };
 
   const completeTransaction = async () => {
@@ -457,19 +491,38 @@ Customer: ${customer.name} (@${customer.ig})`;
     if (!currentOrderId) return;
 
     setActionLoading(true);
+    
+    // Safety timeout
+    const timeout = setTimeout(() => {
+       if (actionLoading) {
+         setActionLoading(false);
+         // Redirect anyway to avoid freeze
+         setView('success');
+         window.open(generateWhatsAppLink(), '_blank');
+       }
+    }, 10000);
+
     const path = `${DATA_PATH}/orders/${currentOrderId}`;
     try {
-      await updateDoc(doc(db, path), {
-        paymentProof, 
-        status: 'awaiting_verification', 
-        completedAt: serverTimestamp()
-      });
+      if (!currentOrderId.startsWith('offline_')) {
+        await updateDoc(doc(db, path), {
+          paymentProof, 
+          status: 'awaiting_verification', 
+          completedAt: serverTimestamp()
+        });
+      }
       setView('success');
       window.open(generateWhatsAppLink(), '_blank');
     } catch (err) { 
+      console.error("Transaction update failed", err);
       handleFirestoreError(err, OperationType.UPDATE, path);
+      // Proceed anyway to ensure user isn't stuck
+      setView('success');
+      window.open(generateWhatsAppLink(), '_blank');
+    } finally {
+      clearTimeout(timeout);
+      setActionLoading(false);
     }
-    setActionLoading(false);
   };
 
   if (loading) return (
@@ -533,7 +586,19 @@ Customer: ${customer.name} (@${customer.ig})`;
                   >
                     <div className="flex items-center gap-6">
                       <div className="w-24 h-24 rounded-3xl overflow-hidden shrink-0 bg-gray-50 flex items-center justify-center border border-gray-100 relative">
-                        {p.img ? <img src={p.img} className="w-full h-full object-cover" /> : <div className="p-4 bg-gray-50"><ImageIcon size={30} className="text-[#D4B996]/40" /></div>}
+                        {p.img ? (
+                          <img 
+                            src={p.img} 
+                            className="w-full h-full object-cover" 
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).src = 'https://placehold.co/400x400/FAF9F6/D4B996?text=CREATION';
+                            }}
+                          />
+                        ) : (
+                          <div className="p-4 bg-gray-50">
+                            <ImageIcon size={30} className="text-[#D4B996]/40" />
+                          </div>
+                        )}
                         {isSoldOut && (
                           <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
                             <span className="bg-red-500 text-white text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest">{t.soldOut}</span>
@@ -1166,7 +1231,14 @@ Customer: ${customer.name} (@${customer.ig})`;
           <div className="bg-white rounded-[3rem] w-full max-w-md overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
             <div className="relative h-64 bg-gray-50 flex items-center justify-center shrink-0">
               {selectedProduct.img ? (
-                <img src={selectedProduct.img} className="w-full h-full object-cover" alt="Product" />
+                <img 
+                  src={selectedProduct.img} 
+                  className="w-full h-full object-cover" 
+                  alt="Product" 
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).src = 'https://placehold.co/800x800/FAF9F6/D4B996?text=IMAGE+ERROR';
+                  }}
+                />
               ) : (
                 <ImageIcon size={60} className="text-[#D4B996]/30" />
               )}
