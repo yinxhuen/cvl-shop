@@ -315,8 +315,12 @@ export default function App() {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, callback: (base64: string) => void) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 800 * 1024) { 
-      showToast(lang === 'zh' ? "图片过大（最大800KB）" : "Image too large (Max 800KB)");
+    
+    // Limit to 300KB. Base64 encoding adds ~33% size. 
+    // We want to avoid hitting the 1MB Firestore document limit,
+    // especially when multiple images are stored in a single document (like qrCodes).
+    if (file.size > 300 * 1024) { 
+      showToast(lang === 'zh' ? "图片过大（最大300KB）" : "Image too large (Max 300KB)");
       return;
     }
     const reader = new FileReader();
@@ -326,25 +330,38 @@ export default function App() {
 
   const updateShopConfig = async (newConfig: ShopConfig) => {
     setActionLoading(true);
+    console.log("Saving new config...", newConfig);
     try {
       const batch = writeBatch(db);
       
       // Save Config (QR Codes)
+      console.log("Adding config qrCodes to batch for settings/config...");
       const configRef = doc(db, `${DATA_PATH}/settings/config`);
+      // Warning: Base64 images for qrCodes can hit the 1MB Firestore document limit
       batch.set(configRef, { qrCodes: newConfig.qrCodes }, { merge: true });
       
       // Save Products individually
+      console.log("Adding individual products to batch...");
       newConfig.products.forEach(p => {
         const pRef = doc(db, `${DATA_PATH}/products/${p.id}`);
         batch.set(pRef, p);
       });
       
+      console.log("Committing batch...");
       await batch.commit();
+      console.log("Batch commit successful!");
       showToast(t.updateSuccess);
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, DATA_PATH);
+      console.error("Error saving config:", err);
+      try {
+        handleFirestoreError(err, OperationType.WRITE, DATA_PATH);
+      } catch (e) {
+        // Suppress the thrown error to ensure loading stops, we already logged it
+      }
+      showToast("Error saving data. Document size may exceed 1MB limit.");
+    } finally {
+      setActionLoading(false);
     }
-    setActionLoading(false);
   };
 
   const generateWhatsAppLink = () => {
