@@ -5,8 +5,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  GoogleAuthProvider, 
-  signInWithPopup, 
+  signInAnonymously, 
   onAuthStateChanged
 } from 'firebase/auth';
 import { 
@@ -112,8 +111,6 @@ const I18N: Record<string, any> = {
     safetyWarning: "Please ensure all details are correct before submitting order.",
     kpopOption: "K-pop version (韩娱版本)",
     stockError: "Sorry, some items are now out of stock.",
-    loginRequired: "Login to Place Order",
-    loginBtn: "Sign in with Google",
     welcome: "Welcome,",
     logout: "Logout"
   },
@@ -160,8 +157,6 @@ const I18N: Record<string, any> = {
     safetyWarning: "提交订单前请确保所有信息准确无误。",
     kpopOption: "K-pop version (韩娱版本)",
     stockError: "抱歉，部分商品库存不足。",
-    loginRequired: "请登录以预订",
-    loginBtn: "使用 Google 账号登录",
     welcome: "欢迎,",
     logout: "登出"
   }
@@ -215,26 +210,20 @@ export default function App() {
   // --- Initialize Auth ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-      if (u) {
+      if (!u) {
+        signInAnonymously(auth).catch(err => {
+          console.error("Anonymous auth error:", err);
+        });
+      } else {
+        setUser(u);
+        setLoading(false);
         console.log("Authenticated as:", u.uid);
       }
     });
     return () => unsubscribe();
   }, []);
 
-  const handleLogin = async () => {
-    setActionLoading(true);
-    try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } catch (err) {
-      console.error("Login error:", err);
-      showToast("Identification failed");
-    }
-    setActionLoading(false);
-  };
+  // Removed handleLogin (using anonymous auth automatically)
 
   // --- Validate Connection ---
   useEffect(() => {
@@ -279,10 +268,9 @@ export default function App() {
     });
 
     const ordersCollection = collection(db, `${DATA_PATH}/orders`);
-    // CRITICAL: Only allow listing if user is the known admin email, 
+    // CRITICAL: Only allow listing if user is the known admin email (handled by isAdmin state here), 
     // otherwise filter by their own UID to avoid permission error.
-    const isActuallyAdmin = user?.email === 'yinxhuen@gmail.com';
-    const ordersQuery = isActuallyAdmin ? ordersCollection : query(ordersCollection, where("uid", "==", user.uid));
+    const ordersQuery = isAdmin ? ordersCollection : query(ordersCollection, where("uid", "==", user.uid));
     
     const unsubOrders = onSnapshot(ordersQuery, (snapshot) => {
       const data = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as Order[];
@@ -525,48 +513,7 @@ Customer: ${customer.name} (@${customer.ig})`;
           <form onSubmit={handleOrder} className="bg-white rounded-[3rem] p-10 shadow-2xl space-y-10 border border-gray-100">
             <h2 className="text-3xl font-serif text-center text-[#2D241E]">{t.fillOrder}</h2>
             
-            {!user ? (
-              <div className="bg-[#FAF9F6] p-10 rounded-[2rem] border-2 border-dashed border-[#D4B996]/30 text-center space-y-6">
-                <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center mx-auto shadow-sm">
-                  <User size={30} className="text-[#D4B996]" />
-                </div>
-                <div className="space-y-2">
-                  <h3 className="text-lg font-serif text-[#2D241E]">{t.loginRequired}</h3>
-                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest leading-relaxed">
-                    We use Google Sign-In to secure your order and provide updates.
-                  </p>
-                </div>
-                <button 
-                  type="button"
-                  onClick={handleLogin}
-                  disabled={actionLoading}
-                  className="w-full bg-white text-[#2D241E] py-5 rounded-2xl font-black text-xs tracking-widest shadow-md border border-gray-100 flex items-center justify-center gap-3 hover:bg-gray-50 transition-colors"
-                >
-                  {actionLoading ? (
-                    <div className="w-4 h-4 border-2 border-[#D4B996] border-t-transparent rounded-full animate-spin" />
-                  ) : (
-                    <LogIn size={18}/>
-                  )}
-                  {t.loginBtn}
-                </button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-3 px-4 py-3 bg-green-50 rounded-2xl border border-green-100">
-                <ShieldCheck size={18} className="text-green-500" />
-                <span className="text-[10px] font-black uppercase text-green-700">
-                  {t.welcome} {user.displayName || 'Authorized User'}
-                </span>
-                <button 
-                  type="button"
-                  onClick={() => auth.signOut()}
-                  className="ml-auto text-[10px] font-black text-gray-400 uppercase hover:text-red-500 transition-colors"
-                >
-                  {t.logout || 'Logout'}
-                </button>
-              </div>
-            )}
-
-            <div className={`space-y-8 ${!user ? 'opacity-40 pointer-events-none' : ''}`}>
+            <div className="space-y-8">
               {cart.art > 0 && (
                 <div className="space-y-4">
                   <label className="text-[10px] uppercase font-black tracking-[0.2em] text-[#8B4513] flex items-center gap-2">
