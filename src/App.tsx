@@ -200,10 +200,14 @@ export default function App() {
   const [paymentProof, setPaymentProof] = useState('');
   
   const [orders, setOrders] = useState<Order[]>([]);
+  const [configSaving, setConfigSaving] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
   // Safety reset for loading states on mount
   useEffect(() => {
+    setConfigSaving(false);
+    setIsUploading(false);
     setActionLoading(false);
   }, []);
   const [toast, setToast] = useState('');
@@ -347,16 +351,17 @@ export default function App() {
     const rawFile = e.target.files?.[0];
     if (!rawFile) return;
 
-    setActionLoading(true);
+    setIsUploading(true);
     try {
+      // Validate and compress
       const file = await validateAndCompressImage(rawFile, 300);
       if (!file) {
         showToast(lang === 'zh' ? "图片处理失败" : "Image processing failed");
         return;
       }
 
-      if (file.size > 500 * 1024) { 
-        showToast(lang === 'zh' ? "图片过大（最大500KB）" : "Image too large (Max 500KB)");
+      if (file.size > 800 * 1024) { 
+        showToast(lang === 'zh' ? "图片过大，请尝试压缩后再上传" : "Image too large, please compress more");
         return;
       }
 
@@ -366,56 +371,72 @@ export default function App() {
       callback(url);
     } catch (error) {
       console.error("Upload failed", error);
-      showToast(lang === 'zh' ? "上传失败，请重试" : "Upload failed, please try again");
+      showToast(lang === 'zh' ? "上传失败，请检查网络" : "Upload failed, check network");
     } finally {
-      setActionLoading(false);
+      setIsUploading(false);
     }
   };
 
   const updateShopConfig = async (newConfig: ShopConfig) => {
-    if (actionLoading) return;
+    if (configSaving) return;
     
-    setActionLoading(true);
-    console.log("Saving new config...", newConfig);
+    // Safety check: Don't allow saving if not admin
+    if (!isAdmin) return showToast("Permission denied");
+
+    setConfigSaving(true);
     
-    // Safety timeout: 15 seconds
+    // Safety timeout: 20 seconds
     const timeout = setTimeout(() => {
-      setActionLoading(false);
-    }, 15000);
+      setConfigSaving(false);
+    }, 20000);
 
     try {
       const batch = writeBatch(db);
       
-      // Save Config (QR Codes)
+      // 1. Sanitize & Save Config (QR Codes)
       const configRef = doc(db, `${DATA_PATH}/settings/config`);
-      batch.set(configRef, { qrCodes: newConfig.qrCodes }, { merge: true });
-      
-      // Save Products
-      newConfig.products.forEach(p => {
-        if (!p.id) return;
-        const pRef = doc(db, `${DATA_PATH}/products/${p.id}`);
-        batch.set(pRef, p, { merge: true });
+      const sanitizedQrCodes: Record<string, string> = {};
+      Object.entries(newConfig.qrCodes || {}).forEach(([key, val]) => {
+        // Exclude base64 strings from save to prevent 1MB limit issues
+        if (val && !val.startsWith('data:')) {
+          sanitizedQrCodes[key] = val;
+        }
       });
+      batch.set(configRef, { qrCodes: sanitizedQrCodes }, { merge: true });
+      
+      // 2. Sanitize & Save Products
+      for (const p of newConfig.products) {
+        if (!p.id) continue;
+        const pRef = doc(db, `${DATA_PATH}/products/${p.id}`);
+        
+        // Skip base64 completely
+        let finalImg = p.img || '';
+        if (finalImg.startsWith('data:')) {
+          finalImg = '';
+        }
+
+        const dataToSave = { 
+          nameEn: p.nameEn || '', 
+          nameZh: p.nameZh || '', 
+          price: Number(p.price) || 0, 
+          stock: Number(p.stock) || 0, 
+          description: p.description || '', 
+          order: Number(p.order) || 0,
+          img: finalImg,
+          updatedAt: serverTimestamp()
+        };
+        
+        batch.set(pRef, dataToSave, { merge: true });
+      }
       
       await batch.commit();
-      showToast(lang === 'zh' ? "保存成功" : "Config saved successfully");
+      showToast(lang === 'zh' ? "设置已成功保存" : "Settings saved successfully");
     } catch (err) {
       console.error("Error saving config:", err);
-      // Try fallback to individual setDoc
-      try {
-        const configRef = doc(db, `${DATA_PATH}/settings/config`);
-        await setDoc(configRef, { qrCodes: newConfig.qrCodes }, { merge: true });
-        for (const p of newConfig.products) {
-          if (p.id) await setDoc(doc(db, `${DATA_PATH}/products/${p.id}`), p, { merge: true });
-        }
-        showToast(lang === 'zh' ? "逐一保存成功" : "Saved via fallback");
-      } catch (innerErr) {
-        console.error("Critical save error:", innerErr);
-        showToast(t.networkError);
-      }
+      showToast(lang === 'zh' ? "保存失败，请检查网络连接" : "Save failed, please check connection");
     } finally {
       clearTimeout(timeout);
-      setActionLoading(false);
+      setConfigSaving(false);
     }
   };
 
@@ -435,8 +456,8 @@ Customer: ${customer.name} (@${customer.ig})`;
     return `https://wa.me/60143655393?text=${encodeURIComponent(message)}`;
   };
 
-  const handleOrder = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleOrder = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     if (totals.count === 0 && tipAmount === 0) return showToast(lang === 'zh' ? "请至少选择一件商品或打赏" : "Select at least one item or leave a tip");
     
     // Inventory Verification
@@ -635,8 +656,13 @@ Customer: ${customer.name} (@${customer.ig})`;
                     <Palette size={14}/> {t.artUploadLabel} *
                   </label>
                   <div className="relative border-2 border-dashed border-[#D4B996]/40 rounded-[2rem] p-8 bg-[#FAF9F6] flex flex-col items-center text-center">
-                    <input type="file" required accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => handleFileUpload(e, (base64) => setCustomization(prev => ({...prev, artImage: base64})))} />
-                    {customization.artImage ? (
+                    <input type="file" required accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => handleFileUpload(e, (url) => setCustomization(prev => ({...prev, artImage: url})))} />
+                    {isUploading ? (
+                      <div className="h-32 flex flex-col items-center justify-center space-y-2">
+                        <div className="w-8 h-8 border-4 border-[#D4B996] border-t-transparent rounded-full animate-spin"></div>
+                        <p className="text-[10px] font-black text-[#D4B996] animate-pulse">UPLOADING...</p>
+                      </div>
+                    ) : customization.artImage ? (
                       <img src={customization.artImage} referrerPolicy="no-referrer" className="h-32 rounded-xl shadow-lg" alt="Custom Art"/>
                     ) : (
                       <>
@@ -807,11 +833,16 @@ Customer: ${customer.name} (@${customer.ig})`;
                 </div>
               </div>
 
-              <div className="space-y-4">
+            <div className="space-y-4">
                 <h3 className="text-center text-xs font-black uppercase tracking-[0.2em] text-[#2D241E]">{t.uploadProof}</h3>
                 <div className="relative border-2 border-dashed border-[#D4B996]/40 rounded-[2.5rem] p-12 bg-[#FAF9F6] flex flex-col items-center">
                   <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => handleFileUpload(e, setPaymentProof)} />
-                  {paymentProof ? (
+                  {isUploading ? (
+                    <div className="h-48 flex flex-col items-center justify-center space-y-2">
+                       <div className="w-12 h-12 border-4 border-[#D4B996] border-t-transparent rounded-full animate-spin"></div>
+                       <p className="text-xs font-black text-[#D4B996] uppercase tracking-widest">Processing...</p>
+                    </div>
+                  ) : paymentProof ? (
                     <img src={paymentProof} className="h-48 rounded-2xl shadow-xl" alt="Payment Proof"/>
                   ) : (
                     <Camera size={40} className="mb-4 text-[#D4B996] opacity-50" />
@@ -1119,21 +1150,39 @@ Customer: ${customer.name} (@${customer.ig})`;
                           )}
                         </div>
                         <label className="absolute inset-0 bg-black/40 text-white rounded-2xl opacity-0 group-hover:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
-                          <Upload size={24} />
+                          {isUploading ? (
+                            <div className="animate-spin rounded-full h-6 w-6 border-2 border-white border-t-transparent"></div>
+                          ) : (
+                            <Upload size={24} />
+                          )}
                           <input 
                             type="file" 
                             className="hidden" 
+                            disabled={isUploading}
                             onChange={(e) => handleFileUpload(e, (url) => {
                               const n = [...assets.products]; 
                               n[idx].img = url; 
                               setAssets({...assets, products: n});
-                              showToast(lang === 'zh' ? "图片已就绪（请保存）" : "Image ready (remember to save)");
+                              showToast(lang === 'zh' ? "图片已就绪" : "Image ready");
                             })} 
                           />
                         </label>
                       </div>
 
                       <div className="grid grid-cols-2 gap-4 flex-1">
+                        <div className="col-span-2">
+                           <label className="text-[10px] text-gray-400 font-bold uppercase">Image URL (Optional)</label>
+                           <input 
+                             placeholder="https://..."
+                             className="w-full px-3 py-2 bg-white rounded-xl border-2 border-transparent focus:border-[#D4B996] outline-none text-[10px] font-mono" 
+                             value={p.img || ''} 
+                             onChange={(e) => { 
+                               const n = [...assets.products]; 
+                               n[idx].img = e.target.value; 
+                               setAssets({...assets, products: n}); 
+                             }} 
+                           />
+                        </div>
                         <div>
                            <label className="text-[10px] text-gray-400 font-bold uppercase">Name (EN)</label>
                            <input className="w-full px-3 py-2 bg-white rounded-xl border-2 border-transparent focus:border-[#D4B996] outline-none text-sm" value={p.nameEn} onChange={(e) => { const n = [...assets.products]; n[idx].nameEn = e.target.value; setAssets({...assets, products: n}); }} />
@@ -1190,34 +1239,46 @@ Customer: ${customer.name} (@${customer.ig})`;
               {(['duitNow', 'tng'] as const).map(key => (
                 <div key={key} className="text-center space-y-4">
                   <p className="text-[10px] font-black uppercase text-[#D4B996]">{key}</p>
-                  <div className="aspect-square bg-[#FAF9F6] rounded-2xl flex items-center justify-center border p-2">
+                  <div className="aspect-square bg-[#FAF9F6] rounded-2xl flex items-center justify-center border p-2 mb-2">
                     {assets.qrCodes[key] ? (
                       <img src={assets.qrCodes[key]} className="w-full h-full object-contain" alt={`${key} QR`}/>
                     ) : (
                       <QrCode size={30} className="text-gray-200" />
                     )}
                   </div>
-                  <label className="inline-flex px-4 py-2 bg-white rounded-full text-[10px] font-bold shadow-sm border cursor-pointer hover:bg-gray-50 transition-colors">
-                    Change
+                  <div className="space-y-2">
                     <input 
-                      type="file" 
-                      className="hidden" 
-                      onChange={(e) => handleFileUpload(e, (url) => setAssets({
+                      placeholder="QR URL"
+                      className="w-full px-2 py-1 bg-white rounded-lg border text-[8px] font-mono outline-none"
+                      value={assets.qrCodes[key] || ''}
+                      onChange={(e) => setAssets({
                         ...assets, 
-                        qrCodes: {...assets.qrCodes, [key]: url}
-                      }))} 
+                        qrCodes: {...assets.qrCodes, [key]: e.target.value}
+                      })}
                     />
-                  </label>
+                    <label className="block w-full py-2 bg-white rounded-full text-[10px] font-bold shadow-sm border cursor-pointer hover:bg-gray-50 transition-colors text-center">
+                      {isUploading ? '...' : 'Upload'}
+                      <input 
+                        type="file" 
+                        className="hidden" 
+                        disabled={isUploading}
+                        onChange={(e) => handleFileUpload(e, (url) => setAssets({
+                          ...assets, 
+                          qrCodes: {...assets.qrCodes, [key]: url}
+                        }))} 
+                      />
+                    </label>
+                  </div>
                 </div>
               ))}
             </div>
 
             <button 
               onClick={() => updateShopConfig(assets)} 
-              disabled={actionLoading}
+              disabled={configSaving || isUploading}
               className="w-full bg-[#2D241E] text-white py-6 rounded-2xl font-black text-sm tracking-widest shadow-lg cursor-pointer hover:bg-[#3D342E] transition-colors disabled:opacity-50"
             >
-              {actionLoading ? 'SAVING...' : 'SAVE ALL CHANGES'}
+              {configSaving ? 'SAVING...' : 'SAVE ALL CHANGES'}
             </button>
           </div>
         </div>
