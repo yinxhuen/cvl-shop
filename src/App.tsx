@@ -368,15 +368,14 @@ export default function App() {
   };
 
   const updateShopConfig = async (newConfig: ShopConfig) => {
+    console.trace("updateShopConfig called"); // Debugging the "auto-save on load" issue
     setActionLoading(true);
     console.log("Saving new config...", newConfig);
     
-    // Safety timeout
+    // Safety timeout: 15 seconds
     const timeout = setTimeout(() => {
-      if (actionLoading) {
-        setActionLoading(false);
-        showToast(lang === 'zh' ? "保存超时，部分数据可能未成功同步" : "Save timed out, some data may not synchronize");
-      }
+      setActionLoading(false);
+      showToast(lang === 'zh' ? "保存超时，部分数据可能未成功同步" : "Save timed out, some data may not synchronize");
     }, 15000);
 
     try {
@@ -449,10 +448,8 @@ Customer: ${customer.name} (@${customer.ig})`;
     
     // Safety timeout: 8 seconds
     const timeout = setTimeout(() => {
-      if (actionLoading) {
-        setActionLoading(false);
-        showToast(lang === 'zh' ? "请求超时，请重试" : "Request timed out, please try again");
-      }
+      setActionLoading(false);
+      showToast(lang === 'zh' ? "请求超时，请重试" : "Request timed out, please try again");
     }, 8000);
 
     const path = `${DATA_PATH}/orders`;
@@ -494,14 +491,12 @@ Customer: ${customer.name} (@${customer.ig})`;
 
     setActionLoading(true);
     
-    // Safety timeout
+    // Safety timeout: 10 seconds
     const timeout = setTimeout(() => {
-       if (actionLoading) {
-         setActionLoading(false);
-         // Redirect anyway to avoid freeze
-         setView('success');
-         window.open(generateWhatsAppLink(), '_blank');
-       }
+       setActionLoading(false);
+       // Redirect anyway to avoid freeze
+       setView('success');
+       window.open(generateWhatsAppLink(), '_blank');
     }, 10000);
 
     const path = `${DATA_PATH}/orders/${currentOrderId}`;
@@ -1049,7 +1044,7 @@ Customer: ${customer.name} (@${customer.ig})`;
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-2xl font-serif text-[#2D241E]">Products</h2>
                 <button
-                  onClick={async () => {
+                  onClick={() => {
                     const newProduct: Product = {
                       id: `prod_${Date.now()}`,
                       nameEn: 'New Product',
@@ -1060,12 +1055,8 @@ Customer: ${customer.name} (@${customer.ig})`;
                       description: '',
                       order: assets.products.length > 0 ? Math.max(...assets.products.map(p => p.order || 0)) + 1 : 0
                     };
-                    try {
-                      await setDoc(doc(db, `${DATA_PATH}/products/${newProduct.id}`), newProduct);
-                    } catch (err) {
-                      console.error("Create product failed", err);
-                      showToast("Create product failed");
-                    }
+                    setAssets(prev => ({ ...prev, products: [...prev.products, newProduct] }));
+                    showToast(lang === 'zh' ? "已添加（请点击保存）" : "Added (Click Save to persist)");
                   }}
                   className="bg-[#D4B996] text-white p-2 rounded-xl"
                 >
@@ -1081,7 +1072,7 @@ Customer: ${customer.name} (@${customer.ig})`;
                        <button 
                          disabled={displayIndex === 0}
                          className="p-1 text-gray-400 hover:text-black disabled:opacity-30"
-                         onClick={async () => {
+                         onClick={() => {
                            if (displayIndex === 0) return;
                            const n = [...assets.products];
                            const prevIdx = assets.products.findIndex(ap => ap.id === sortedArray[displayIndex - 1].id);
@@ -1089,15 +1080,6 @@ Customer: ${customer.name} (@${customer.ig})`;
                            n[idx].order = n[prevIdx].order ?? 0;
                            n[prevIdx].order = temp ?? 0;
                            setAssets({...assets, products: n});
-                           
-                           try {
-                             const batch = writeBatch(db);
-                             batch.set(doc(db, `${DATA_PATH}/products/${n[idx].id}`), n[idx]);
-                             batch.set(doc(db, `${DATA_PATH}/products/${n[prevIdx].id}`), n[prevIdx]);
-                             await batch.commit();
-                           } catch (err) {
-                             console.error("Move UP auto-save failed", err);
-                           }
                          }}
                        >
                          <ChevronUp size={20}/>
@@ -1105,7 +1087,7 @@ Customer: ${customer.name} (@${customer.ig})`;
                        <button 
                          disabled={displayIndex === sortedArray.length - 1}
                          className="p-1 text-gray-400 hover:text-black disabled:opacity-30"
-                         onClick={async () => {
+                         onClick={() => {
                            if (displayIndex === sortedArray.length - 1) return;
                            const n = [...assets.products];
                            const nextIdx = assets.products.findIndex(ap => ap.id === sortedArray[displayIndex + 1].id);
@@ -1113,15 +1095,6 @@ Customer: ${customer.name} (@${customer.ig})`;
                            n[idx].order = n[nextIdx].order ?? 0;
                            n[nextIdx].order = temp ?? 0;
                            setAssets({...assets, products: n});
-                           
-                           try {
-                             const batch = writeBatch(db);
-                             batch.set(doc(db, `${DATA_PATH}/products/${n[idx].id}`), n[idx]);
-                             batch.set(doc(db, `${DATA_PATH}/products/${n[nextIdx].id}`), n[nextIdx]);
-                             await batch.commit();
-                           } catch (err) {
-                             console.error("Move DOWN auto-save failed", err);
-                           }
                          }}
                        >
                          <ChevronDown size={20}/>
@@ -1179,19 +1152,11 @@ Customer: ${customer.name} (@${customer.ig})`;
                     <div className="flex justify-end pt-4 border-t border-[#D4B996]/20">
                       <button 
                          className="flex items-center gap-2 text-xs font-bold text-red-500 hover:text-red-700"
-                         onClick={async (e) => {
+                         onClick={(e) => {
                            if ((e.target as HTMLButtonElement).innerText === 'Confirm Delete?') {
-                             setActionLoading(true);
-                             try {
-                               const pRef = doc(db, `${DATA_PATH}/products/${p.id}`);
-                               await deleteDoc(pRef);
-                               const n = assets.products.filter(ap => ap.id !== p.id);
-                               setAssets({...assets, products: n});
-                             } catch(err) {
-                               console.error(err);
-                               showToast('Delete failed');
-                             }
-                             setActionLoading(false);
+                             const n = assets.products.filter(ap => ap.id !== p.id);
+                             setAssets({...assets, products: n});
+                             showToast(lang === 'zh' ? "已移除（请点击保存）" : "Removed (Click Save to persist)");
                            } else {
                              (e.target as HTMLButtonElement).innerText = 'Confirm Delete?';
                              setTimeout(() => {
