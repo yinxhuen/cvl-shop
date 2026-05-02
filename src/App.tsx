@@ -68,14 +68,21 @@ const ADMIN_CREDENTIALS = {
   password: 'password123'
 };
 
+const INITIAL_COUPONS = [
+  { code: "CVL10", discount: 10, remaining: Infinity },
+  { code: "FRIEND5", discount: 5, remaining: Infinity },
+  { code: "QL110", discount: 10, remaining: 1 },
+  { code: "WB120", discount: 5, remaining: 1 }
+];
+
 // --- Localization ---
 const I18N: Record<string, any> = {
   en: {
     shopTitle: "CvL Co.",
     shopSub: "Limited Student Dessert & Handcraft Pre-order",
-    pickupLocation: "ADDA HEIGHTS",
-    pickupDates: "May 3 / May 4",
-    pickupAvailable: "Pickup available on May 3 and May 4",
+    pickupLocation: "Location",
+    pickupDates: "Date",
+    pickupAvailable: "Pickup available on",
     itemsTitle: "Our Creations",
     fillOrder: "1. Order Details",
     deliveryTitle: "Delivery Method",
@@ -119,9 +126,9 @@ const I18N: Record<string, any> = {
   zh: {
     shopTitle: "CvL Co.",
     shopSub: "学生手工甜点与创意周边限量预订",
-    pickupLocation: "ADDA HEIGHTS",
-    pickupDates: "5月3日 / 5月4日",
-    pickupAvailable: "自取日期：5月3日 及 5月4日",
+    pickupLocation: "取货地点",
+    pickupDates: "取货日期",
+    pickupAvailable: "自取日期：",
     itemsTitle: "本期好物",
     fillOrder: "1. 填写订购信息",
     deliveryTitle: "配送方式",
@@ -166,10 +173,10 @@ const I18N: Record<string, any> = {
 
 
 const DEFAULT_PRODUCTS: Product[] = [
-  { id: 'tiramisu', nameEn: 'Tiramisu', nameZh: '提拉米苏', price: 12, stock: 12, img: "", description: '', order: 0 },
-  { id: 'bracelet', nameEn: 'Beaded Bracelet Mystery Box', nameZh: '串珠手链盲盒', price: 2, stock: 3, img: "", description: '', order: 1 },
-  { id: 'mystery', nameEn: 'Small Item Mystery Box', nameZh: '小废物盲盒', price: 3, stock: 12, img: "", description: '', order: 2 },
-  { id: 'art', nameEn: 'Abstract Mini Art', nameZh: '抽象画', price: 2, stock: 999999, img: "", description: '', order: 3 }
+  { id: 'tiramisu', nameEn: 'Tiramisu', nameZh: '提拉米苏', price: 12, stock: 12, image: "", description: '', order: 0 },
+  { id: 'bracelet', nameEn: 'Beaded Bracelet Mystery Box', nameZh: '串珠手链盲盒', price: 2, stock: 3, image: "", description: '', order: 1 },
+  { id: 'mystery', nameEn: 'Small Item Mystery Box', nameZh: '小废物盲盒', price: 3, stock: 12, image: "", description: '', order: 2 },
+  { id: 'art', nameEn: 'Abstract Mini Art', nameZh: '抽象画', price: 2, stock: 999999, image: "", description: '', order: 3 }
 ];
 
 
@@ -183,7 +190,9 @@ export default function App() {
 
   const [assets, setAssets] = useState<ShopConfig>({
     products: DEFAULT_PRODUCTS,
-    qrCodes: { duitNow: '', tng: '' }
+    qrCodes: { duitNow: '', tng: '' },
+    pickupDate: 'May 3 / May 4',
+    pickupLocation: 'ADDA HEIGHTS'
   });
 
   const [cart, setCart] = useState<Record<string, number>>({});
@@ -203,6 +212,11 @@ export default function App() {
   const [configSaving, setConfigSaving] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+
+  const [coupons, setCoupons] = useState(INITIAL_COUPONS);
+  const [couponInput, setCouponInput] = useState('');
+  const [appliedCoupon, setAppliedCoupon] = useState<any>(null);
+  const [couponMessage, setCouponMessage] = useState<{ text: string, type: 'error' | 'success' } | null>(null);
 
   // Safety reset for loading states on mount
   useEffect(() => {
@@ -286,7 +300,9 @@ export default function App() {
         const data = snapshot.data();
         setAssets(prev => ({
           ...prev,
-          qrCodes: data.qrCodes || prev.qrCodes
+          qrCodes: data.qrCodes || prev.qrCodes,
+          pickupDate: data.pickupDate || prev.pickupDate,
+          pickupLocation: data.pickupLocation || prev.pickupLocation
         }));
       }
     }, (err) => {
@@ -330,11 +346,13 @@ export default function App() {
   const totals = useMemo(() => {
     const itemsTotal = assets.products.reduce((sum: number, p) => sum + (Number(cart[p.id]) || 0) * p.price, 0);
     const cardPrice = greeting.type === 'hasCard' ? 0.5 : 0;
+    const discount = appliedCoupon ? appliedCoupon.discount : 0;
     return { 
-      final: Math.max(0, itemsTotal + cardPrice + tipAmount),
-      count: Object.values(cart).reduce((a: number, b: number) => a + b, 0)
+      final: Math.max(0, itemsTotal + cardPrice + tipAmount - discount),
+      count: Object.values(cart).reduce((a: number, b: number) => a + b, 0),
+      discount
     };
-  }, [cart, greeting, assets.products, tipAmount]);
+  }, [cart, greeting, assets.products, tipAmount, appliedCoupon]);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -347,31 +365,33 @@ export default function App() {
     return await getDownloadURL(fileRef);
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, callback: (url: string) => void) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, callback: (base64: string) => void) => {
     const rawFile = e.target.files?.[0];
     if (!rawFile) return;
 
     setIsUploading(true);
     try {
-      // Validate and compress
-      const file = await validateAndCompressImage(rawFile, 300);
+      // Validate and compress slightly to help with Firestore's 1MB limit
+      const file = await validateAndCompressImage(rawFile, 400); 
       if (!file) {
         showToast(lang === 'zh' ? "图片处理失败" : "Image processing failed");
         return;
       }
 
       if (file.size > 800 * 1024) { 
-        showToast(lang === 'zh' ? "图片过大，请尝试压缩后再上传" : "Image too large, please compress more");
+        showToast(lang === 'zh' ? "图片还是过大，请尝试压缩后再上传" : "Image still too large, please compress more");
         return;
       }
 
-      const ext = file.name.split('.').pop() || 'jpg';
-      const path = `uploads/${Date.now()}_${Math.random().toString(36).substring(2)}.${ext}`;
-      const url = await uploadToStorage(file, path);
-      callback(url);
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const base64 = event.target?.result as string;
+        callback(base64);
+      };
+      reader.readAsDataURL(file);
     } catch (error) {
       console.error("Upload failed", error);
-      showToast(lang === 'zh' ? "上传失败，请检查网络" : "Upload failed, check network");
+      showToast(lang === 'zh' ? "处理失败" : "Processing failed");
     } finally {
       setIsUploading(false);
     }
@@ -393,28 +413,19 @@ export default function App() {
     try {
       const batch = writeBatch(db);
       
-      // 1. Sanitize & Save Config (QR Codes)
+      // 1. Save Config (QR Codes & Pickup Info)
       const configRef = doc(db, `${DATA_PATH}/settings/config`);
-      const sanitizedQrCodes: Record<string, string> = {};
-      Object.entries(newConfig.qrCodes || {}).forEach(([key, val]) => {
-        // Exclude base64 strings from save to prevent 1MB limit issues
-        if (val && !val.startsWith('data:')) {
-          sanitizedQrCodes[key] = val;
-        }
-      });
-      batch.set(configRef, { qrCodes: sanitizedQrCodes }, { merge: true });
+      batch.set(configRef, { 
+        qrCodes: newConfig.qrCodes || {},
+        pickupDate: newConfig.pickupDate || '',
+        pickupLocation: newConfig.pickupLocation || ''
+      }, { merge: true });
       
-      // 2. Sanitize & Save Products
+      // 2. Save Products
       for (const p of newConfig.products) {
         if (!p.id) continue;
         const pRef = doc(db, `${DATA_PATH}/products/${p.id}`);
         
-        // Skip base64 completely
-        let finalImg = p.img || '';
-        if (finalImg.startsWith('data:')) {
-          finalImg = '';
-        }
-
         const dataToSave = { 
           nameEn: p.nameEn || '', 
           nameZh: p.nameZh || '', 
@@ -422,7 +433,7 @@ export default function App() {
           stock: Number(p.stock) || 0, 
           description: p.description || '', 
           order: Number(p.order) || 0,
-          img: finalImg,
+          image: p.image || '',
           updatedAt: serverTimestamp()
         };
         
@@ -440,6 +451,33 @@ export default function App() {
     }
   };
 
+  const handleApplyCoupon = () => {
+    const code = couponInput.trim().toUpperCase();
+    if (!code) return;
+
+    const couponIdx = coupons.findIndex(c => c.code === code);
+    if (couponIdx === -1) {
+      setCouponMessage({ text: lang === 'zh' ? '无效优惠券' : 'Invalid coupon', type: 'error' });
+      return;
+    }
+
+    const coupon = coupons[couponIdx];
+    if (coupon.remaining <= 0) {
+      setCouponMessage({ text: lang === 'zh' ? '该优惠券已领完' : 'Coupon already used', type: 'error' });
+      return;
+    }
+
+    // Success
+    setAppliedCoupon(coupon);
+    setCouponMessage({ text: lang === 'zh' ? `已应用 RM${coupon.discount} 优惠` : `Applied RM${coupon.discount} discount`, type: 'success' });
+    
+    // Update local state for remaining count
+    const newCoupons = [...coupons];
+    if (newCoupons[couponIdx].remaining !== Infinity) {
+      newCoupons[couponIdx].remaining -= 1;
+    }
+    setCoupons(newCoupons);
+  };
   const generateWhatsAppLink = () => {
     const itemsStr = assets.products
       .filter(p => cart[p.id] > 0)
@@ -611,9 +649,9 @@ Customer: ${customer.name} (@${customer.ig})`;
                   >
                     <div className="flex items-center gap-6">
                       <div className="w-24 h-24 rounded-3xl overflow-hidden shrink-0 bg-gray-50 flex items-center justify-center border border-gray-100 relative">
-                        {p.img && p.img.trim() !== '' ? (
+                        {p.image && p.image.trim() !== '' ? (
                           <img 
-                            src={p.img} 
+                            src={p.image} 
                             className="w-full h-full object-cover" 
                             referrerPolicy="no-referrer"
                             loading="lazy"
@@ -694,11 +732,11 @@ Customer: ${customer.name} (@${customer.ig})`;
                     <div className="bg-[#FAF9F6] p-5 rounded-2xl border border-[#D4B996]/20 space-y-2">
                       <div className="flex items-center gap-2 text-[#8B4513]">
                         <MapPin size={14} />
-                        <span className="text-xs font-black uppercase tracking-widest">{t.pickupLocation}</span>
+                        <span className="text-xs font-black uppercase tracking-widest">{assets.pickupLocation}</span>
                       </div>
                       <div className="flex items-center gap-2 text-[#D4B996]">
                         <Calendar size={14} />
-                        <span className="text-[10px] font-bold">{t.pickupAvailable}</span>
+                        <span className="text-[10px] font-bold">{t.pickupAvailable} {assets.pickupDate}</span>
                       </div>
                     </div>
                   ) : (
@@ -778,11 +816,40 @@ Customer: ${customer.name} (@${customer.ig})`;
                      </div>
                   </div>
                 </div>
+
+                <div className="pt-6 border-t border-gray-50 space-y-4">
+                   <label className="text-[10px] uppercase font-black tracking-[0.2em] text-[#D4B996] px-2">Coupon Code</label>
+                   <div className="flex gap-3">
+                     <input 
+                       className="flex-1 bg-[#FAF9F6] rounded-xl px-5 py-3 text-sm outline-none border-2 border-transparent focus:border-[#D4B996] uppercase"
+                       placeholder="Enter code..."
+                       value={couponInput}
+                       onChange={e => setCouponInput(e.target.value)}
+                       disabled={!!appliedCoupon}
+                     />
+                     <button 
+                       type="button"
+                       onClick={handleApplyCoupon}
+                       disabled={!!appliedCoupon || !couponInput}
+                       className="bg-[#D4B996] text-white px-6 py-3 rounded-xl font-black text-[10px] tracking-widest disabled:opacity-50"
+                     >
+                       APPLY
+                     </button>
+                   </div>
+                   {couponMessage && (
+                     <p className={`text-[10px] font-bold px-2 ${couponMessage.type === 'error' ? 'text-red-500' : 'text-green-600'}`}>
+                       {couponMessage.text}
+                     </p>
+                   )}
+                </div>
               </div>
             </div>
 
             <div className="pt-8 flex flex-col items-center gap-8">
-              <div className="text-center">
+              <div className="text-center w-full space-y-2">
+                {totals.discount > 0 && (
+                   <p className="text-[10px] font-black text-green-600 uppercase tracking-widest">Discount applied: -RM{totals.discount.toFixed(2)}</p>
+                )}
                 <p className="text-[10px] uppercase tracking-[0.3em] text-[#D4B996] font-black mb-2">{t.grandTotal}</p>
                 <p className="text-5xl font-serif text-[#8B4513]">RM{totals.final.toFixed(2)}</p>
               </div>
@@ -1078,7 +1145,29 @@ Customer: ${customer.name} (@${customer.ig})`;
             <ArrowLeft size={16}/> Back
           </button>
           
-          <div className="bg-white rounded-[3rem] p-10 shadow-xl space-y-12">
+            <div className="bg-white rounded-[3rem] p-10 shadow-xl space-y-12">
+            <div className="space-y-6">
+              <h2 className="text-2xl font-serif text-[#2D241E]">Shop Configuration</h2>
+              <div className="grid grid-cols-2 gap-6">
+                <div>
+                  <label className="text-[10px] uppercase font-black text-[#D4B996]">Pickup Location</label>
+                  <input 
+                    className="w-full px-5 py-4 bg-[#FAF9F6] rounded-2xl border-2 border-transparent focus:border-[#D4B996] outline-none text-sm" 
+                    value={assets.pickupLocation} 
+                    onChange={e => setAssets({...assets, pickupLocation: e.target.value})} 
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-black text-[#D4B996]">Pickup Date Info</label>
+                  <input 
+                    className="w-full px-5 py-4 bg-[#FAF9F6] rounded-2xl border-2 border-transparent focus:border-[#D4B996] outline-none text-sm" 
+                    value={assets.pickupDate} 
+                    onChange={e => setAssets({...assets, pickupDate: e.target.value})} 
+                  />
+                </div>
+              </div>
+            </div>
+
             <div>
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-2xl font-serif text-[#2D241E]">Products</h2>
@@ -1090,7 +1179,7 @@ Customer: ${customer.name} (@${customer.ig})`;
                       nameZh: '新产品',
                       price: 0,
                       stock: 10,
-                      img: '',
+                      image: '',
                       description: '',
                       order: assets.products.length > 0 ? Math.max(...assets.products.map(p => p.order || 0)) + 1 : 0
                     };
@@ -1143,8 +1232,8 @@ Customer: ${customer.name} (@${customer.ig})`;
                     <div className="flex gap-6 pr-12">
                       <div className="flex flex-col gap-2 relative group">
                         <div className="w-24 h-24 rounded-2xl bg-white flex items-center justify-center overflow-hidden border">
-                          {p.img && p.img.trim() !== '' ? (
-                            <img src={p.img} className="w-full h-full object-cover" alt={p.nameEn} />
+                          {p.image && p.image.trim() !== '' ? (
+                            <img src={p.image} className="w-full h-full object-cover" alt={p.nameEn} />
                           ) : (
                             <ImageIcon className="text-gray-200" />
                           )}
@@ -1161,7 +1250,7 @@ Customer: ${customer.name} (@${customer.ig})`;
                             disabled={isUploading}
                             onChange={(e) => handleFileUpload(e, (url) => {
                               const n = [...assets.products]; 
-                              n[idx].img = url; 
+                              n[idx].image = url; 
                               setAssets({...assets, products: n});
                               showToast(lang === 'zh' ? "图片已就绪" : "Image ready");
                             })} 
@@ -1175,10 +1264,10 @@ Customer: ${customer.name} (@${customer.ig})`;
                            <input 
                              placeholder="https://..."
                              className="w-full px-3 py-2 bg-white rounded-xl border-2 border-transparent focus:border-[#D4B996] outline-none text-[10px] font-mono" 
-                             value={p.img || ''} 
+                             value={p.image || ''} 
                              onChange={(e) => { 
                                const n = [...assets.products]; 
-                               n[idx].img = e.target.value; 
+                               n[idx].image = e.target.value; 
                                setAssets({...assets, products: n}); 
                              }} 
                            />
@@ -1295,10 +1384,10 @@ Customer: ${customer.name} (@${customer.ig})`;
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white rounded-[3rem] w-full max-w-md overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
             <div className="relative h-64 bg-gray-50 flex items-center justify-center shrink-0">
-              {selectedProduct.img && selectedProduct.img.trim() !== '' ? (
+              {selectedProduct.image && selectedProduct.image.trim() !== '' ? (
                 <img 
-                  src={selectedProduct.img} 
-                  className="w-full h-full object-cover" 
+                  src={selectedProduct.image} 
+                  className="w-full max-h-[300px] object-contain block mx-auto py-4" 
                   alt="Product" 
                   referrerPolicy="no-referrer"
                   loading="eager"

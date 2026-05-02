@@ -4,7 +4,7 @@ export interface Product {
   nameZh: string;
   price: number;
   stock: number;
-  img: string;
+  image: string;
   description: string;
   order: number;
 }
@@ -52,4 +52,6 @@ export interface ShopConfig {
     duitNow: string;
     tng: string;
   };
+  pickupDate: string;
+  pickupLocation: string;
 }
