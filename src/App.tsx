@@ -241,111 +241,43 @@ export default function App() {
     return levels;
   }, [orders]);
 
-  // --- Initialize Auth ---
+  // --- Initialize App Data ---
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      if (!u) {
-        signInAnonymously(auth).catch(err => {
-          console.error("Anonymous auth error:", err);
-          setLoading(false);
-        });
-      } else {
-        setUser(u);
-        setLoading(false);
-        console.log("Authenticated as:", u.uid, "| Anonymous:", u.isAnonymous);
-      }
-    });
+    setLoading(true);
     
-    // Load local config fallback if available
+    // 1. Authenticate (keep it for any other dependencies, but non-blocking)
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      if (u) setUser(u);
+    });
+
+    // 2. Load from LocalStorage
     try {
+      // Load Shop Config (Products, QR, Pickup)
       const localAssets = localStorage.getItem(`${APP_ID}_config`);
       if (localAssets) {
         setAssets(JSON.parse(localAssets));
-        console.log("Loaded local config fallback");
+        console.log("📦 Loaded Shop Config from LocalStorage");
+      }
+
+      // Load Orders (for stock count)
+      const localOrders = localStorage.getItem(`${APP_ID}_orders`);
+      if (localOrders) {
+        setOrders(JSON.parse(localOrders));
+        console.log("📦 Loaded Orders from LocalStorage");
       }
     } catch (e) {
       console.error("Local storage load error:", e);
-    }
-    
-    // Safety timeout: stop loading after 10 seconds regardless
-    const timeout = setTimeout(() => {
+    } finally {
       setLoading(false);
-    }, 10000);
+    }
 
-    return () => {
-      unsubscribe();
-      clearTimeout(timeout);
-    };
+    return () => unsubscribe();
   }, []);
 
-  // Removed handleLogin (using anonymous auth automatically)
-
-  // --- Validate Connection ---
+  // --- Data sync removed (using purely local storage) ---
   useEffect(() => {
-    const testConnection = async () => {
-      try {
-        await getDocFromServer(doc(db, 'test', 'connection'));
-      } catch (error) {
-        if(error instanceof Error && error.message.includes('the client is offline')) {
-          console.error("Please check your Firebase configuration.");
-        }
-      }
-    }
-    testConnection();
+     // Config and orders are now managed via localStorage in the main initialize effect
   }, []);
-
-  // --- Data Listeners ---
-  useEffect(() => {
-    if (!user) return;
-    
-    // Only show loader if we don't have products yet
-    if (assets.products.length === 0) {
-      setLoading(true);
-    }
-
-    const configRef = doc(db, `${DATA_PATH}/settings/config`);
-    const unsubConfig = onSnapshot(configRef, (snapshot) => {
-      if (snapshot.exists()) {
-        const data = snapshot.data();
-        setAssets(prev => ({
-          ...prev,
-          qrCodes: data.qrCodes || prev.qrCodes,
-          pickupDate: data.pickupDate || prev.pickupDate,
-          pickupLocation: data.pickupLocation || prev.pickupLocation
-        }));
-      }
-    }, (err) => {
-      console.warn("Config listener error:", err);
-    });
-
-    const productsRef = collection(db, `${DATA_PATH}/products`);
-    const unsubProducts = onSnapshot(productsRef, (snapshot) => {
-      let data = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as Product[];
-      if (data.length === 0) {
-        data = DEFAULT_PRODUCTS;
-      }
-      setAssets(prev => ({ ...prev, products: data.sort((a, b) => (a.order || 0) - (b.order || 0)) }));
-      setLoading(false);
-    }, (err) => {
-      setLoading(false);
-      setInitialError("Database connection failed. Please check your network or Firebase rules.");
-      handleFirestoreError(err, OperationType.LIST, `${DATA_PATH}/products`);
-    });
-
-    const ordersCollection = collection(db, `${DATA_PATH}/orders`);
-    // CRITICAL: Only allow listing if user is the known admin email (handled by isAdmin state here), 
-    // otherwise filter by their own UID to avoid permission error.
-    const ordersQuery = isAdmin ? ordersCollection : query(ordersCollection, where("uid", "==", user.uid));
-    
-    const unsubOrders = onSnapshot(ordersQuery, (snapshot) => {
-      const data = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as Order[];
-      setOrders(data);
-    }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, `${DATA_PATH}/orders`);
-    });
-
-    return () => { unsubConfig(); unsubProducts(); unsubOrders(); };
-  }, [user]);
 
   const getStockLimit = (id: string) => {
     const prod = assets.products.find(p => p.id === id);
@@ -409,91 +341,22 @@ export default function App() {
   const updateShopConfig = async (newConfig: ShopConfig) => {
     if (configSaving) return;
     
-    console.log("Starting Shop Config Save...", newConfig);
-    
-    // Safety check: Don't allow saving if not admin
-    if (!isAdmin) {
-      console.warn("Save blocked: user is not admin");
-      return showToast("Permission denied");
-    }
-
+    console.log("💾 Locally Saving Shop Config...", newConfig);
     setConfigSaving(true);
     
-    // Safety timeout: 20 seconds
-    const timeout = setTimeout(() => {
-      setConfigSaving(false);
-    }, 20000);
-
     try {
-      // 1. Try Local Storage Save First (Guaranteed to "succeed" locally)
-      try {
-        localStorage.setItem(`${APP_ID}_config`, JSON.stringify(newConfig));
-        console.log("Successfully saved to localStorage");
-      } catch (lsErr) {
-        console.error("LocalStorage save failed:", lsErr);
-      }
-
-      // 2. Try Firestore Save
-      const batch = writeBatch(db);
+      // Primary Save to LocalStorage
+      localStorage.setItem(`${APP_ID}_config`, JSON.stringify(newConfig));
       
-      // 1. Save Config (QR Codes & Pickup Info)
-      const configRef = doc(db, `${DATA_PATH}/settings/config`);
-      const configData = { 
-        qrCodes: newConfig.qrCodes || {},
-        pickupDate: newConfig.pickupDate || '',
-        pickupLocation: newConfig.pickupLocation || ''
-      };
+      // Update local state
+      setAssets(newConfig);
       
-      console.log("Batch Adding: Config", configData);
-      batch.set(configRef, configData, { merge: true });
-      
-      // 2. Save Products
-      let totalBatchSize = 0;
-      for (const p of newConfig.products) {
-        if (!p.id) continue;
-        const pRef = doc(db, `${DATA_PATH}/products/${p.id}`);
-        
-        const dataToSave = { 
-          nameEn: p.nameEn || '', 
-          nameZh: p.nameZh || '', 
-          price: Number(p.price) || 0, 
-          stock: Number(p.stock) || 0, 
-          description: p.description || '', 
-          order: Number(p.order) || 0,
-          image: p.image || '',
-          updatedAt: serverTimestamp()
-        };
-        
-        const jsonSize = JSON.stringify(dataToSave).length;
-        totalBatchSize += jsonSize;
-        console.log(`Batch Adding: Product ${p.id} (size approx: ${jsonSize} bytes)`);
-        
-        if (jsonSize > 1000000) {
-           console.error(`Product ${p.id} exceeds 1MB Firestore limit!`);
-           throw new Error(`Product ${p.id} image is too large for database.`);
-        }
-
-        batch.set(pRef, dataToSave, { merge: true });
-      }
-      
-      console.log(`Total Batch Size approx: ${totalBatchSize} bytes. Committing...`);
-      await batch.commit();
-      console.log("Firestore Batch Commit Success!");
-      showToast(lang === 'zh' ? "设置已成功保存 (及本地)" : "Settings saved successfully (locally & cloud)");
+      console.log("✅ Local Save Success");
+      showToast(lang === 'zh' ? "设置已本地保存" : "Settings saved locally");
     } catch (err) {
-      console.error("Firestore save exception:", err);
-      handleFirestoreError(err, OperationType.WRITE, DATA_PATH);
-      
-      // If Firestore fails, we still consider it "saved locally"
-      const isPermissionError = err instanceof Error && (err.message.includes("permission-denied") || err.message.includes("insufficient permissions"));
-      
-      if (isPermissionError) {
-        showToast(lang === 'zh' ? "权限不足：已保存到本地浏览器，但云端失败。请尝试使用Google账号登录管理员" : "Permission Denied: Saved to local browser, but cloud failed. Try Google Login for Cloud Sync.");
-      } else {
-        showToast(lang === 'zh' ? "正在使用本地保存：云端上传失败，请检查网络" : "Using Local Save: Cloud sync failed, check network");
-      }
+      console.error("Local save error:", err);
+      showToast(lang === 'zh' ? "保存失败：空间不足" : "Local save failed: Storage full");
     } finally {
-      clearTimeout(timeout);
       setConfigSaving(false);
     }
   };
@@ -559,41 +422,33 @@ Customer: ${customer.name} (@${customer.ig})`;
 
     setActionLoading(true);
     
-    // Safety timeout: 8 seconds
-    const timeout = setTimeout(() => {
-      setActionLoading(false);
-      showToast(lang === 'zh' ? "请求超时，请重试" : "Request timed out, please try again");
-    }, 8000);
-
-    const path = `${DATA_PATH}/orders`;
     try {
-      const orderData: Omit<Order, 'id'> = {
+      const orderId = `ORD-${Date.now()}`;
+      const orderData = {
+        id: orderId,
         customer, 
         cart, 
-        greeting: {
-          type: greeting.type,
-          message: greeting.message
-        }, 
+        greeting, 
         customization, 
         tip: tipAmount,
         totals, 
         status: 'pending_payment', 
-        createdAt: serverTimestamp(), 
-        uid: user?.uid || 'anon'
+        createdAt: new Date().toISOString()
       };
       
-      const docRef = await addDoc(collection(db, path), orderData);
-      setCurrentOrderId(docRef.id);
+      // Save locally
+      const localOrders = JSON.parse(localStorage.getItem(`${APP_ID}_orders`) || '[]');
+      localOrders.unshift(orderData);
+      localStorage.setItem(`${APP_ID}_orders`, JSON.stringify(localOrders));
+
+      setCurrentOrderId(orderId);
       setView('payment');
+      console.log("✅ Order created locally:", orderId);
     } catch (err) { 
-      console.error("Order creation failed", err);
-      handleFirestoreError(err, OperationType.CREATE, path);
-      // Fallback: Still allow payment view but Warn user
+      console.error("Local order initial save failed", err);
       setCurrentOrderId(`offline_${Date.now()}`);
       setView('payment');
-      showToast(lang === 'zh' ? "系统繁忙，订单已本地记录" : "System busy, order recorded locally");
     } finally {
-      clearTimeout(timeout);
       setActionLoading(false);
     }
   };
@@ -604,33 +459,25 @@ Customer: ${customer.name} (@${customer.ig})`;
 
     setActionLoading(true);
     
-    // Safety timeout: 10 seconds
-    const timeout = setTimeout(() => {
-       setActionLoading(false);
-       // Redirect anyway to avoid freeze
-       setView('success');
-       window.open(generateWhatsAppLink(), '_blank');
-    }, 10000);
-
-    const path = `${DATA_PATH}/orders/${currentOrderId}`;
     try {
-      if (!currentOrderId.startsWith('offline_')) {
-        await updateDoc(doc(db, path), {
-          paymentProof, 
-          status: 'awaiting_verification', 
-          completedAt: serverTimestamp()
-        });
-      }
+      // Update local order status
+      const localOrders = JSON.parse(localStorage.getItem(`${APP_ID}_orders`) || '[]');
+      const out = localOrders.map((o: any) => {
+        if (o.id === currentOrderId) {
+          return { ...o, paymentProof, status: 'awaiting_verification', completedAt: new Date().toISOString() };
+        }
+        return o;
+      });
+      localStorage.setItem(`${APP_ID}_orders`, JSON.stringify(out));
+      
+      console.log("✅ Transaction completed locally");
       setView('success');
       window.open(generateWhatsAppLink(), '_blank');
     } catch (err) { 
-      console.error("Transaction update failed", err);
-      handleFirestoreError(err, OperationType.UPDATE, path);
-      // Proceed anyway to ensure user isn't stuck
+      console.error("Local transaction update failed", err);
       setView('success');
       window.open(generateWhatsAppLink(), '_blank');
     } finally {
-      clearTimeout(timeout);
       setActionLoading(false);
     }
   };
