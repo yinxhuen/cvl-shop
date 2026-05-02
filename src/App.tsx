@@ -58,7 +58,7 @@ import {
   Plus,
   Pencil
 } from 'lucide-react';
-import { auth, db, storage, DATA_PATH } from './lib/firebase';
+import { auth, db, storage, DATA_PATH, APP_ID } from './lib/firebase';
 import { handleFirestoreError, OperationType, validateAndCompressImage } from './lib/utils';
 import { Product, Customer, Greeting, Customization, Order, ShopConfig } from './types';
 
@@ -247,16 +247,25 @@ export default function App() {
       if (!u) {
         signInAnonymously(auth).catch(err => {
           console.error("Anonymous auth error:", err);
-          // Even if auth fails, we should stop the initial loader
-          // so the user can at least see the app (even if limited)
           setLoading(false);
         });
       } else {
         setUser(u);
         setLoading(false);
-        console.log("Authenticated as:", u.uid);
+        console.log("Authenticated as:", u.uid, "| Anonymous:", u.isAnonymous);
       }
     });
+    
+    // Load local config fallback if available
+    try {
+      const localAssets = localStorage.getItem(`${APP_ID}_config`);
+      if (localAssets) {
+        setAssets(JSON.parse(localAssets));
+        console.log("Loaded local config fallback");
+      }
+    } catch (e) {
+      console.error("Local storage load error:", e);
+    }
     
     // Safety timeout: stop loading after 10 seconds regardless
     const timeout = setTimeout(() => {
@@ -400,8 +409,13 @@ export default function App() {
   const updateShopConfig = async (newConfig: ShopConfig) => {
     if (configSaving) return;
     
+    console.log("Starting Shop Config Save...", newConfig);
+    
     // Safety check: Don't allow saving if not admin
-    if (!isAdmin) return showToast("Permission denied");
+    if (!isAdmin) {
+      console.warn("Save blocked: user is not admin");
+      return showToast("Permission denied");
+    }
 
     setConfigSaving(true);
     
@@ -411,17 +425,30 @@ export default function App() {
     }, 20000);
 
     try {
+      // 1. Try Local Storage Save First (Guaranteed to "succeed" locally)
+      try {
+        localStorage.setItem(`${APP_ID}_config`, JSON.stringify(newConfig));
+        console.log("Successfully saved to localStorage");
+      } catch (lsErr) {
+        console.error("LocalStorage save failed:", lsErr);
+      }
+
+      // 2. Try Firestore Save
       const batch = writeBatch(db);
       
       // 1. Save Config (QR Codes & Pickup Info)
       const configRef = doc(db, `${DATA_PATH}/settings/config`);
-      batch.set(configRef, { 
+      const configData = { 
         qrCodes: newConfig.qrCodes || {},
         pickupDate: newConfig.pickupDate || '',
         pickupLocation: newConfig.pickupLocation || ''
-      }, { merge: true });
+      };
+      
+      console.log("Batch Adding: Config", configData);
+      batch.set(configRef, configData, { merge: true });
       
       // 2. Save Products
+      let totalBatchSize = 0;
       for (const p of newConfig.products) {
         if (!p.id) continue;
         const pRef = doc(db, `${DATA_PATH}/products/${p.id}`);
@@ -437,14 +464,34 @@ export default function App() {
           updatedAt: serverTimestamp()
         };
         
+        const jsonSize = JSON.stringify(dataToSave).length;
+        totalBatchSize += jsonSize;
+        console.log(`Batch Adding: Product ${p.id} (size approx: ${jsonSize} bytes)`);
+        
+        if (jsonSize > 1000000) {
+           console.error(`Product ${p.id} exceeds 1MB Firestore limit!`);
+           throw new Error(`Product ${p.id} image is too large for database.`);
+        }
+
         batch.set(pRef, dataToSave, { merge: true });
       }
       
+      console.log(`Total Batch Size approx: ${totalBatchSize} bytes. Committing...`);
       await batch.commit();
-      showToast(lang === 'zh' ? "设置已成功保存" : "Settings saved successfully");
+      console.log("Firestore Batch Commit Success!");
+      showToast(lang === 'zh' ? "设置已成功保存 (及本地)" : "Settings saved successfully (locally & cloud)");
     } catch (err) {
-      console.error("Error saving config:", err);
-      showToast(lang === 'zh' ? "保存失败，请检查网络连接" : "Save failed, please check connection");
+      console.error("Firestore save exception:", err);
+      handleFirestoreError(err, OperationType.WRITE, DATA_PATH);
+      
+      // If Firestore fails, we still consider it "saved locally"
+      const isPermissionError = err instanceof Error && (err.message.includes("permission-denied") || err.message.includes("insufficient permissions"));
+      
+      if (isPermissionError) {
+        showToast(lang === 'zh' ? "权限不足：已保存到本地浏览器，但云端失败。请尝试使用Google账号登录管理员" : "Permission Denied: Saved to local browser, but cloud failed. Try Google Login for Cloud Sync.");
+      } else {
+        showToast(lang === 'zh' ? "正在使用本地保存：云端上传失败，请检查网络" : "Using Local Save: Cloud sync failed, check network");
+      }
     } finally {
       clearTimeout(timeout);
       setConfigSaving(false);
