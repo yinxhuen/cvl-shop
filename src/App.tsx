@@ -201,6 +201,11 @@ export default function App() {
   
   const [orders, setOrders] = useState<Order[]>([]);
   const [actionLoading, setActionLoading] = useState(false);
+
+  // Safety reset for loading states on mount
+  useEffect(() => {
+    setActionLoading(false);
+  }, []);
   const [toast, setToast] = useState('');
 
   const t = I18N[lang];
@@ -368,14 +373,14 @@ export default function App() {
   };
 
   const updateShopConfig = async (newConfig: ShopConfig) => {
-    console.trace("updateShopConfig called"); // Debugging the "auto-save on load" issue
+    if (actionLoading) return;
+    
     setActionLoading(true);
     console.log("Saving new config...", newConfig);
     
     // Safety timeout: 15 seconds
     const timeout = setTimeout(() => {
       setActionLoading(false);
-      showToast(lang === 'zh' ? "保存超时，部分数据可能未成功同步" : "Save timed out, some data may not synchronize");
     }, 15000);
 
     try {
@@ -385,26 +390,28 @@ export default function App() {
       const configRef = doc(db, `${DATA_PATH}/settings/config`);
       batch.set(configRef, { qrCodes: newConfig.qrCodes }, { merge: true });
       
-      // Save Products individually
+      // Save Products
       newConfig.products.forEach(p => {
-        // Double check for malformed products
         if (!p.id) return;
         const pRef = doc(db, `${DATA_PATH}/products/${p.id}`);
-        batch.set(pRef, p);
+        batch.set(pRef, p, { merge: true });
       });
       
       await batch.commit();
-      showToast(t.updateSuccess);
+      showToast(lang === 'zh' ? "保存成功" : "Config saved successfully");
     } catch (err) {
       console.error("Error saving config:", err);
-      // Try saving individually if batch fails
+      // Try fallback to individual setDoc
       try {
+        const configRef = doc(db, `${DATA_PATH}/settings/config`);
+        await setDoc(configRef, { qrCodes: newConfig.qrCodes }, { merge: true });
         for (const p of newConfig.products) {
-          await setDoc(doc(db, `${DATA_PATH}/products/${p.id}`), p);
+          if (p.id) await setDoc(doc(db, `${DATA_PATH}/products/${p.id}`), p, { merge: true });
         }
-        showToast(lang === 'zh' ? "部分保存成功（逐个同步）" : "Saved via individual sync");
+        showToast(lang === 'zh' ? "逐一保存成功" : "Saved via fallback");
       } catch (innerErr) {
-        showToast("CRITICAL SAVE ERROR: Document state invalid.");
+        console.error("Critical save error:", innerErr);
+        showToast(t.networkError);
       }
     } finally {
       clearTimeout(timeout);
@@ -583,17 +590,18 @@ Customer: ${customer.name} (@${customer.ig})`;
                   >
                     <div className="flex items-center gap-6">
                       <div className="w-24 h-24 rounded-3xl overflow-hidden shrink-0 bg-gray-50 flex items-center justify-center border border-gray-100 relative">
-                        {p.img ? (
+                        {p.img && p.img.trim() !== '' ? (
                           <img 
                             src={p.img} 
                             className="w-full h-full object-cover" 
                             referrerPolicy="no-referrer"
+                            loading="lazy"
                             onError={(e) => {
-                              (e.target as HTMLImageElement).src = 'https://placehold.co/400x400/FAF9F6/D4B996?text=CREATION';
+                              (e.target as HTMLImageElement).src = 'https://placehold.co/400x400/FAF9F6/D4B996?text=ITEM';
                             }}
                           />
                         ) : (
-                          <div className="p-4 bg-gray-50">
+                          <div className="p-4 bg-gray-50 flex items-center justify-center w-full h-full">
                             <ImageIcon size={30} className="text-[#D4B996]/40" />
                           </div>
                         )}
@@ -1104,7 +1112,11 @@ Customer: ${customer.name} (@${customer.ig})`;
                     <div className="flex gap-6 pr-12">
                       <div className="flex flex-col gap-2 relative group">
                         <div className="w-24 h-24 rounded-2xl bg-white flex items-center justify-center overflow-hidden border">
-                          {p.img ? <img src={p.img} className="w-full h-full object-cover" alt={p.nameEn} /> : <ImageIcon className="text-gray-200" />}
+                          {p.img && p.img.trim() !== '' ? (
+                            <img src={p.img} className="w-full h-full object-cover" alt={p.nameEn} />
+                          ) : (
+                            <ImageIcon className="text-gray-200" />
+                          )}
                         </div>
                         <label className="absolute inset-0 bg-black/40 text-white rounded-2xl opacity-0 group-hover:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
                           <Upload size={24} />
@@ -1115,6 +1127,7 @@ Customer: ${customer.name} (@${customer.ig})`;
                               const n = [...assets.products]; 
                               n[idx].img = url; 
                               setAssets({...assets, products: n});
+                              showToast(lang === 'zh' ? "图片已就绪（请保存）" : "Image ready (remember to save)");
                             })} 
                           />
                         </label>
@@ -1189,9 +1202,9 @@ Customer: ${customer.name} (@${customer.ig})`;
                     <input 
                       type="file" 
                       className="hidden" 
-                      onChange={(e) => handleFileUpload(e, (base64) => setAssets({
+                      onChange={(e) => handleFileUpload(e, (url) => setAssets({
                         ...assets, 
-                        qrCodes: {...assets.qrCodes, [key]: base64}
+                        qrCodes: {...assets.qrCodes, [key]: url}
                       }))} 
                     />
                   </label>
@@ -1221,18 +1234,21 @@ Customer: ${customer.name} (@${customer.ig})`;
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white rounded-[3rem] w-full max-w-md overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
             <div className="relative h-64 bg-gray-50 flex items-center justify-center shrink-0">
-              {selectedProduct.img ? (
+              {selectedProduct.img && selectedProduct.img.trim() !== '' ? (
                 <img 
                   src={selectedProduct.img} 
                   className="w-full h-full object-cover" 
                   alt="Product" 
                   referrerPolicy="no-referrer"
+                  loading="eager"
                   onError={(e) => {
-                    (e.target as HTMLImageElement).src = 'https://placehold.co/800x800/FAF9F6/D4B996?text=IMAGE+ERROR';
+                    (e.target as HTMLImageElement).src = 'https://placehold.co/800x800/FAF9F6/D4B996?text=CREATION';
                   }}
                 />
               ) : (
-                <ImageIcon size={60} className="text-[#D4B996]/30" />
+                <div className="p-12 bg-gray-50 flex items-center justify-center w-full h-full">
+                   <ImageIcon size={60} className="text-[#D4B996]/30" />
+                </div>
               )}
               <button 
                 onClick={() => setIsProductModalOpen(false)}
