@@ -5,27 +5,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  signInAnonymously, 
-  onAuthStateChanged,
-  GoogleAuthProvider,
-  signInWithPopup
-} from 'firebase/auth';
-import { 
-  collection, 
-  onSnapshot, 
-  addDoc, 
-  updateDoc, 
-  doc, 
-  setDoc,
-  serverTimestamp,
-  getDocFromServer,
-  query,
-  where,
-  writeBatch,
-  deleteDoc
-} from 'firebase/firestore';
-import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
-import { 
   CheckCircle2,
   Camera, 
   ArrowLeft,
@@ -58,8 +37,8 @@ import {
   Plus,
   Pencil
 } from 'lucide-react';
-import { auth, db, storage, DATA_PATH, APP_ID } from './lib/firebase';
-import { handleFirestoreError, OperationType, validateAndCompressImage } from './lib/utils';
+import { supabase, isSupabaseConfigured } from './lib/supabase';
+import { validateAndCompressImage } from './lib/utils';
 import { Product, Customer, Greeting, Customization, Order, ShopConfig } from './types';
 
 // --- Admin Credentials ---
@@ -243,40 +222,93 @@ export default function App() {
 
   // --- Initialize App Data ---
   useEffect(() => {
-    setLoading(true);
-    
-    // 1. Authenticate (keep it for any other dependencies, but non-blocking)
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      if (u) setUser(u);
-    });
-
-    // 2. Load from LocalStorage
-    try {
-      // Load Shop Config (Products, QR, Pickup)
-      const localAssets = localStorage.getItem(`${APP_ID}_config`);
-      if (localAssets) {
-        setAssets(JSON.parse(localAssets));
-        console.log("📦 Loaded Shop Config from LocalStorage");
-      }
-
-      // Load Orders (for stock count)
-      const localOrders = localStorage.getItem(`${APP_ID}_orders`);
-      if (localOrders) {
-        setOrders(JSON.parse(localOrders));
-        console.log("📦 Loaded Orders from LocalStorage");
-      }
-    } catch (e) {
-      console.error("Local storage load error:", e);
-    } finally {
+    if (!isSupabaseConfigured) {
       setLoading(false);
+      return;
     }
+    const initApp = async () => {
+      setLoading(true);
+      try {
+        // 1. Fetch Products
+        const { data: productsData, error: pError } = await supabase
+          .from('products')
+          .select('*')
+          .order('order_index', { ascending: true });
+        
+        if (pError) throw pError;
+        
+        const mappedProducts = (productsData || []).map(p => ({
+          id: p.id,
+          nameEn: p.name_en,
+          nameZh: p.name_zh,
+          price: p.price,
+          stock: p.stock,
+          image: p.image_url,
+          description: p.description,
+          order: p.order_index
+        }));
 
-    return () => unsubscribe();
-  }, []);
+        // 2. Fetch Settings
+        const { data: settingsData, error: sError } = await supabase
+          .from('settings')
+          .select('*');
+        
+        if (sError) throw sError;
 
-  // --- Data sync removed (using purely local storage) ---
-  useEffect(() => {
-     // Config and orders are now managed via localStorage in the main initialize effect
+        const configMap: Record<string, any> = {};
+        settingsData?.forEach(s => {
+          configMap[s.key] = s.value;
+        });
+
+        setAssets({
+          products: mappedProducts.length > 0 ? mappedProducts : DEFAULT_PRODUCTS,
+          qrCodes: configMap.qr_codes || { duitNow: '', tng: '' },
+          pickupDate: configMap.pickup_date || 'May 3 / May 4',
+          pickupLocation: configMap.pickup_location || 'ADDA HEIGHTS'
+        });
+
+        // 3. Fetch Orders
+        const { data: ordersData, error: oError } = await supabase
+          .from('orders')
+          .select('*')
+          .order('created_at', { ascending: false });
+        
+        if (oError) throw oError;
+        
+        setOrders((ordersData || []).map(o => ({
+          id: o.id,
+          customer: o.customer,
+          cart: o.cart,
+          greeting: o.greeting,
+          customization: o.customization,
+          tip: o.tip,
+          totals: o.totals,
+          status: o.status,
+          paymentProof: o.payment_proof,
+          createdAt: o.created_at
+        })));
+
+      } catch (err) {
+        console.error("Initialization error:", err);
+        setInitialError(lang === 'zh' ? "连接云端失败, 请检查数据库配置" : "Cloud connection failed, check DB config");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    initApp();
+
+    // Setup real-time listeners
+    const productsChannel = supabase
+      .channel('public:products')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => initApp())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => initApp())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' }, () => initApp())
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(productsChannel);
+    };
   }, []);
 
   const getStockLimit = (id: string) => {
@@ -300,36 +332,35 @@ export default function App() {
     setTimeout(() => setToast(''), 3000);
   };
 
-  const uploadToStorage = async (file: File, path: string): Promise<string> => {
-    const fileRef = ref(storage, path);
-    await uploadBytesResumable(fileRef, file);
-    return await getDownloadURL(fileRef);
-  };
-
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, callback: (base64: string) => void) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, callback: (url: string) => void) => {
     const rawFile = e.target.files?.[0];
     if (!rawFile) return;
 
+    if (!isSupabaseConfigured) {
+      showToast("Cloud storage not configured");
+      return;
+    }
+
     setIsUploading(true);
     try {
-      // Validate and compress slightly to help with Firestore's 1MB limit
-      const file = await validateAndCompressImage(rawFile, 400); 
-      if (!file) {
-        showToast(lang === 'zh' ? "图片处理失败" : "Image processing failed");
-        return;
-      }
+      const file = await validateAndCompressImage(rawFile, 800); 
+      if (!file) throw new Error("Processing failed");
 
-      if (file.size > 800 * 1024) { 
-        showToast(lang === 'zh' ? "图片还是过大，请尝试压缩后再上传" : "Image still too large, please compress more");
-        return;
-      }
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${Math.random().toString(36).substring(2)}_${Date.now()}.${fileExt}`;
+      const filePath = `uploads/${fileName}`;
 
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const base64 = event.target?.result as string;
-        callback(base64);
-      };
-      reader.readAsDataURL(file);
+      const { data, error } = await supabase.storage
+        .from('images')
+        .upload(filePath, file);
+
+      if (error) throw error;
+
+      const { data: { publicUrl } } = supabase.storage
+        .from('images')
+        .getPublicUrl(filePath);
+
+      callback(publicUrl);
     } catch (error) {
       console.error("Upload failed", error);
       showToast(lang === 'zh' ? "处理失败" : "Processing failed");
@@ -341,21 +372,47 @@ export default function App() {
   const updateShopConfig = async (newConfig: ShopConfig) => {
     if (configSaving) return;
     
-    console.log("💾 Locally Saving Shop Config...", newConfig);
+    if (!isSupabaseConfigured) return showToast("Cloud connection not configured");
+    if (!isAdmin) return showToast("Permission denied");
+
     setConfigSaving(true);
     
     try {
-      // Primary Save to LocalStorage
-      localStorage.setItem(`${APP_ID}_config`, JSON.stringify(newConfig));
-      
-      // Update local state
-      setAssets(newConfig);
-      
-      console.log("✅ Local Save Success");
-      showToast(lang === 'zh' ? "设置已本地保存" : "Settings saved locally");
+      // 1. Update Settings
+      const settingsItems = [
+        { key: 'qr_codes', value: newConfig.qrCodes },
+        { key: 'pickup_date', value: newConfig.pickupDate },
+        { key: 'pickup_location', value: newConfig.pickupLocation }
+      ];
+
+      for (const item of settingsItems) {
+        const { error } = await supabase
+          .from('settings')
+          .upsert(item, { onConflict: 'key' });
+        if (error) throw error;
+      }
+
+      // 2. Update Products
+      for (const p of newConfig.products) {
+        const { error } = await supabase
+          .from('products')
+          .upsert({
+            id: p.id,
+            name_en: p.nameEn,
+            name_zh: p.nameZh,
+            price: p.price,
+            stock: p.stock,
+            description: p.description,
+            image_url: p.image,
+            order_index: p.order
+          }, { onConflict: 'id' });
+        if (error) throw error;
+      }
+
+      showToast(lang === 'zh' ? "设置已成功保存到云端" : "Settings saved to cloud successfully");
     } catch (err) {
-      console.error("Local save error:", err);
-      showToast(lang === 'zh' ? "保存失败：空间不足" : "Local save failed: Storage full");
+      console.error("Save error:", err);
+      showToast(lang === 'zh' ? "保存失败" : "Save failed");
     } finally {
       setConfigSaving(false);
     }
@@ -408,6 +465,11 @@ Customer: ${customer.name} (@${customer.ig})`;
     e?.preventDefault();
     if (totals.count === 0 && tipAmount === 0) return showToast(lang === 'zh' ? "请至少选择一件商品或打赏" : "Select at least one item or leave a tip");
     
+    if (!isSupabaseConfigured) {
+      showToast("Store cloud connection not configured");
+      return;
+    }
+
     // Inventory Verification
     let isOversold = false;
     Object.entries(cart).forEach(([id, qty]) => {
@@ -423,31 +485,31 @@ Customer: ${customer.name} (@${customer.ig})`;
     setActionLoading(true);
     
     try {
-      const orderId = `ORD-${Date.now()}`;
-      const orderData = {
-        id: orderId,
-        customer, 
-        cart, 
-        greeting, 
-        customization, 
-        tip: tipAmount,
-        totals, 
-        status: 'pending_payment', 
-        createdAt: new Date().toISOString()
-      };
+      const { data, error } = await supabase
+        .from('orders')
+        .insert({
+          customer_name: customer.name,
+          phone: customer.phone,
+          items: cart,
+          total_price: totals.final,
+          customer, 
+          cart, 
+          greeting, 
+          customization, 
+          tip: tipAmount,
+          totals, 
+          status: 'pending_payment'
+        })
+        .select()
+        .single();
       
-      // Save locally
-      const localOrders = JSON.parse(localStorage.getItem(`${APP_ID}_orders`) || '[]');
-      localOrders.unshift(orderData);
-      localStorage.setItem(`${APP_ID}_orders`, JSON.stringify(localOrders));
-
-      setCurrentOrderId(orderId);
+      if (error) throw error;
+      setCurrentOrderId(data.id);
       setView('payment');
-      console.log("✅ Order created locally:", orderId);
+      console.log("✅ Order created:", data.id);
     } catch (err) { 
-      console.error("Local order initial save failed", err);
-      setCurrentOrderId(`offline_${Date.now()}`);
-      setView('payment');
+      console.error("Order creation failed", err);
+      showToast(lang === 'zh' ? "提交订单失败" : "Failed to submit order");
     } finally {
       setActionLoading(false);
     }
@@ -457,26 +519,30 @@ Customer: ${customer.name} (@${customer.ig})`;
     if (!paymentProof) return showToast(t.mustUpload);
     if (!currentOrderId) return;
 
+    if (!isSupabaseConfigured) {
+      showToast("Cloud connection error");
+      return;
+    }
+
     setActionLoading(true);
     
     try {
-      // Update local order status
-      const localOrders = JSON.parse(localStorage.getItem(`${APP_ID}_orders`) || '[]');
-      const out = localOrders.map((o: any) => {
-        if (o.id === currentOrderId) {
-          return { ...o, paymentProof, status: 'awaiting_verification', completedAt: new Date().toISOString() };
-        }
-        return o;
-      });
-      localStorage.setItem(`${APP_ID}_orders`, JSON.stringify(out));
+      const { error } = await supabase
+        .from('orders')
+        .update({
+          payment_proof: paymentProof,
+          status: 'awaiting_verification'
+        })
+        .eq('id', currentOrderId);
+
+      if (error) throw error;
       
-      console.log("✅ Transaction completed locally");
+      console.log("✅ Transaction completed");
       setView('success');
       window.open(generateWhatsAppLink(), '_blank');
     } catch (err) { 
-      console.error("Local transaction update failed", err);
-      setView('success');
-      window.open(generateWhatsAppLink(), '_blank');
+      console.error("Transaction update failed", err);
+      showToast(lang === 'zh' ? "订单更新失败" : "Failed to update order");
     } finally {
       setActionLoading(false);
     }
@@ -871,29 +937,6 @@ Customer: ${customer.name} (@${customer.ig})`;
                 setIsAdmin(true); setView('admin-dashboard');
               } else showToast("Denied");
             }} className="w-full bg-[#2D241E] text-white py-5 rounded-2xl font-black text-xs cursor-pointer">AUTHENTICATE</button>
-            <div className="space-y-4 pt-4 border-t border-gray-100">
-              <div className="relative">
-                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-200"></div></div>
-                <div className="relative flex justify-center text-[10px]"><span className="px-3 bg-white text-gray-400 font-bold uppercase tracking-widest">Or Secure Admin Session</span></div>
-              </div>
-              <button 
-                onClick={async () => {
-                  try {
-                    const provider = new GoogleAuthProvider();
-                    await signInWithPopup(auth, provider);
-                    setIsAdmin(true); 
-                    setView('admin-dashboard');
-                  } catch (err) {
-                    console.error("Google Admin Login error:", err);
-                    showToast("Google Auth Failed");
-                  }
-                }}
-                className="w-full bg-white text-[#2D241E] py-5 rounded-2xl font-black text-xs tracking-widest shadow-md border border-gray-100 flex items-center justify-center gap-3 hover:bg-gray-50 transition-colors"
-              >
-                <LogIn size={18}/>
-                SIGN IN WITH GOOGLE
-              </button>
-            </div>
             <button onClick={() => setView('home')} className="w-full text-center text-xs text-gray-400 cursor-pointer pt-4 uppercase font-black tracking-widest">Cancel</button>
           </div>
         </div>
@@ -925,8 +968,8 @@ Customer: ${customer.name} (@${customer.ig})`;
               <div className="bg-white p-20 rounded-[3rem] text-center text-gray-400 italic">No orders yet.</div>
             ) : (
               orders.slice().sort((a: any, b: any) => {
-                const timeB: number = b.createdAt?.toMillis?.() || 0;
-                const timeA: number = a.createdAt?.toMillis?.() || 0;
+                const timeB = new Date(b.createdAt).getTime();
+                const timeA = new Date(a.createdAt).getTime();
                 return timeB - timeA;
               }).map(order => {
                 console.log("Order Customization Data:", order.id, order.customization);
@@ -1025,13 +1068,44 @@ Customer: ${customer.name} (@${customer.ig})`;
                       )}
                     </div>
                   </div>
+
+                  <div className="mt-8 flex gap-4">
+                    {order.status !== 'completed' && (
+                      <button 
+                        onClick={async () => {
+                           const { error } = await supabase
+                            .from('orders')
+                            .update({ status: 'completed' })
+                            .eq('id', order.id);
+                           if (error) console.error(error);
+                        }}
+                        className="flex-1 bg-green-500 text-white py-3 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-green-600"
+                      >
+                        Approve & Done
+                      </button>
+                    )}
+                    <button 
+                      onClick={async () => {
+                        if(confirm('Delete order?')) {
+                          const { error } = await supabase
+                            .from('orders')
+                            .delete()
+                            .eq('id', order.id);
+                          if (error) console.error(error);
+                        }
+                      }}
+                      className="bg-red-50 text-red-400 p-3 rounded-xl hover:bg-red-100 transition-colors"
+                    >
+                      <Trash2 size={16}/>
+                    </button>
+                  </div>
                 </div>
-              );
-            })
-          )}
+                );
+              })
+            )}
+          </div>
         </div>
-      </div>
-    )}
+      )}
 
       {view === 'admin-settings' && isAdmin && (
         <div className="max-w-4xl mx-auto px-6 py-12">
