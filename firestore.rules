@@ -1,0 +1,82 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global helpers
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // We don't have a formal admin list in the user's code yet, 
+    // but the code uses a hardcoded admin/password check in the UI. 
+    // For real security, we should check an 'admins' collection.
+    // However, the user provided code depends on being able to write to config/orders from the client.
+    
+    function isAdmin() { 
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'yinxhuen@gmail.com'
+      );
+    }
+
+    match /artifacts/{appId}/public/data {
+      
+      match /settings/config {
+        allow read: if true;
+        allow write: if isAdmin();
+      }
+
+      match /products/{productId} {
+        allow read: if true;
+        allow write: if isAdmin();
+      }
+
+      match /orders/{orderId} {
+        // Validation helper for Order
+        function isValidOrder(data) {
+          return data.keys().hasAll(['customer', 'cart', 'status', 'createdAt', 'uid'])
+            && data.customer is map
+            && data.cart is map
+            && data.status in ['pending_payment', 'awaiting_verification', 'completed', 'cancelled']
+            && data.uid is string
+            && data.customer.name is string && data.customer.name.size() <= 100
+            && data.customer.phone is string && data.customer.phone.size() <= 20;
+        }
+
+        // Anonymous users can create orders
+        allow create: if isSignedIn() 
+          && isValidId(orderId)
+          && isValidOrder(incoming())
+          && incoming().uid == request.auth.uid
+          && incoming().status == 'pending_payment'
+          && incoming().createdAt == request.time;
+
+        // Users can update their own orders to upload payment proof
+        allow update: if isSignedIn()
+          && incoming().uid == request.auth.uid
+          && existing().uid == request.auth.uid
+          && (
+            // Action: Upload Payment Proof
+            (incoming().diff(existing()).affectedKeys().hasOnly(['paymentProof', 'status', 'completedAt'])
+             && incoming().status == 'awaiting_verification'
+             && incoming().paymentProof is string
+             && incoming().completedAt == request.time)
+            || isAdmin()
+          );
+
+        // Only admins can read all orders or delete
+        allow read, delete: if isAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      }
+    }
+
+    // Admin collection for the rule check
+    match /admins/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+    }
+  }
+}

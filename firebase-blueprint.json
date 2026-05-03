@@ -1,0 +1,64 @@
+{
+  "entities": {
+    "Config": {
+      "title": "Shop Configuration",
+      "description": "Global settings for the shop like QR codes",
+      "type": "object",
+      "properties": {
+        "qrCodes": {
+          "type": "object",
+          "description": "Base64 encoded QR codes for payments"
+        }
+      },
+      "required": ["qrCodes"]
+    },
+    "Product": {
+      "title": "Shop Product",
+      "description": "Individual product details including image",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nameEn": { "type": "string" },
+        "nameZh": { "type": "string" },
+        "price": { "type": "number" },
+        "img": { "type": "string" }
+      },
+      "required": ["id", "nameEn", "nameZh", "price"]
+    },
+    "Order": {
+      "title": "Customer Order",
+      "description": "Details of a customer order including items, payment proof and status",
+      "type": "object",
+      "properties": {
+        "customer": { "type": "object" },
+        "cart": { "type": "object" },
+        "greeting": { "type": "object" },
+        "customization": { "type": "object" },
+        "totals": { "type": "object" },
+        "status": { 
+          "type": "string",
+          "enum": ["pending_payment", "awaiting_verification", "completed", "cancelled"]
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "paymentProof": { "type": "string" },
+        "uid": { "type": "string" }
+      },
+      "required": ["customer", "cart", "status", "createdAt", "uid"]
+    }
+  },
+  "firestore": {
+    "settings/config": {
+      "schema": "Config",
+      "description": "Global shop configuration"
+    },
+    "products/{productId}": {
+      "schema": "Product",
+      "description": "Collection of available products"
+    },
+    "orders/{orderId}": {
+      "schema": "Order",
+      "description": "Collection of customer orders"
+    }
+  }
+}
